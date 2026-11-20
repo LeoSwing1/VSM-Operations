@@ -35,6 +35,7 @@ export default async function Notifications({ searchParams }: { searchParams: Pr
   return (
     <>
       <PageHeader eyebrow="Inbox" title="Notifications">
+        <Link href="/notifications/preferences" className="btn-ghost">Email preferences</Link>
         <form action={markAll}><button className="btn-ghost">Mark all read</button></form>
       </PageHeader>
       <div className="mb-4 flex flex-wrap gap-2">

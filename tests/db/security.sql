@@ -349,6 +349,65 @@ select t_ok((select count(*) from audit_events where action like 'permission.ove
 select t_denied(format($$update employees set status = 'EXITED' where id = %L$$, :'e_s'), 'the last Super Admin can never be exited (even by the system)');
 
 
+-- ===========================================================================
+-- 11. Notification preferences, digest, integration status (0007)
+-- ===========================================================================
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_rows(format($$insert into notification_preferences(org_id,employee_id,category,mode) values (%L,%L,'TASKS','MUTED')$$, :'org', :'e_a'), 1, 'A sets own email preference');
+select t_denied(format($$insert into notification_preferences(org_id,employee_id,category,mode) values (%L,%L,'TASKS','MUTED')$$, :'org', :'e_b'), 'A cannot set B''s preferences');
+select t_denied(format($$insert into notification_preferences(org_id,employee_id,category,mode) values (%L,%L,'SYSTEM','MUTED')$$, :'org', :'e_a'), 'SYSTEM emails can never be muted');
+select t_denied($$select enqueue_email(null,'x@y.z',null,'task.assigned','{}','hack')$$, 'employees cannot enqueue arbitrary emails');
+select t_ok((select count(*) from integration_status) = 0, 'A cannot read integration status');
+select t_denied($$select record_integration_test('email', true)$$, 'A cannot record integration tests');
+select t_denied($$select retry_failed_emails()$$, 'A cannot re-queue emails');
+reset role;
+
+-- Muted: task assigned to A by M → in-app notification still created, email SKIPPED
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+insert into tasks(org_id,title,assignee_id) values (:'org','Muted email test',:'e_a') returning id as t_muted \gset
+reset role;
+select t_ok((select status from email_outbox where dedupe_key = 'task.assigned:' || :'t_muted' || ':' || :'e_a') = 'SKIPPED', 'muted category → email skipped (kept for traceability)');
+select t_ok((select count(*) from notifications where dedupe_key = 'task.assigned:' || :'t_muted' || ':' || :'e_a') = 1, 'muted email still leaves the in-app notification');
+
+-- Digest: switch to DIGEST → no outbox row, a digest item instead; build sends one email
+update notification_preferences set mode = 'DIGEST' where employee_id = :'e_a' and category = 'TASKS';
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+insert into tasks(org_id,title,assignee_id) values (:'org','Digest test 1',:'e_a') returning id as t_d1 \gset
+insert into tasks(org_id,title,assignee_id) values (:'org','Digest test 2',:'e_a') returning id as t_d2 \gset
+reset role;
+select t_ok((select count(*) from email_outbox where dedupe_key in ('task.assigned:' || :'t_d1' || ':' || :'e_a', 'task.assigned:' || :'t_d2' || ':' || :'e_a')) = 0, 'digest mode → no immediate email');
+select t_ok((select count(*) from notification_digest_items where employee_id = :'e_a' and sent_at is null) = 2, 'digest mode → items collected');
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((select count(*) from notification_digest_items) = 0, 'B cannot see A''s digest items');
+reset role;
+set role service_role;
+select t_ok(build_daily_digests() >= 1, 'digest builder runs (service role)');
+reset role;
+select t_ok((select jsonb_array_length(payload->'items') from email_outbox where template = 'digest.daily' and recipient_employee_id = :'e_a') = 2, 'one digest email carrying both items');
+select t_ok((select count(*) from notification_digest_items where employee_id = :'e_a' and sent_at is null) = 0, 'digest items marked sent');
+set role service_role;
+select t_ok(build_daily_digests() = 0, 'running the builder again sends nothing twice');
+reset role;
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_denied($$select build_daily_digests()$$, 'employees cannot trigger digests');
+reset role;
+
+-- Integration status: admin records a real test; failures count up, success resets
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select record_integration_test('email', false, 'Brevo 401: key not valid');
+select record_integration_test('email', false, 'Brevo 401: key not valid');
+select t_ok((select failure_count from integration_status where key = 'email') = 2, 'failed tests are counted');
+select record_integration_test('email', true);
+select t_ok((select failure_count = 0 and last_test_ok from integration_status where key = 'email'), 'a passing test resets the failure count');
+select t_ok((select count(*) from audit_events where action = 'integration.tested') = 3, 'integration tests are audited');
+reset role;
+update email_outbox set status = 'FAILED', next_attempt_at = 'infinity' where template = 'digest.daily';
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select t_ok(retry_failed_emails() >= 1, 'admin re-queues failed emails');
+reset role;
+select t_ok((select count(*) from email_outbox where status = 'FAILED') = 0, 'failed emails are queued again');
+
+
 -- Smoke: every public table is readable (subject to RLS) by every persona without policy errors.
 create or replace function t_sweep(label text) returns void language plpgsql as $$
 declare t record; n int;

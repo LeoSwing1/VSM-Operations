@@ -22,9 +22,11 @@ export default async function Login({ searchParams }: { searchParams: Promise<Re
           <h2 className="display mb-8 text-3xl">{forgot ? "Reset password" : "Sign in"}</h2>
           <Flash sp={sp} />
           {sp.e === "no-employee" && (
-            <p className="mb-6 rounded-xl border border-ember/50 bg-ember/10 px-4 py-3 text-sm text-ember">
-              Your login works, but it isn&apos;t linked to an active employee profile. Ask HR to link your account.
-            </p>
+            <div className="mb-6 rounded-xl border border-ember/50 bg-ember/10 px-4 py-3 text-sm text-ember">
+              Your login works, but it isn&apos;t linked to an active employee profile. If you are setting up the system, run
+              <code className="mx-1 font-mono">bootstrap_organization</code> with this account&apos;s UID (RUNBOOK step 2). Otherwise ask HR to link your account.
+              <form action="/auth/signout" method="post" className="mt-3"><button className="btn-ghost">Sign out and use another account</button></form>
+            </div>
           )}
           {forgot ? (
             <form action={sendReset} className="space-y-4">

@@ -44,6 +44,24 @@ export const templates: Record<string, (p: P) => Rendered> = {
       { label: "View payslip", href: `${app()}/payroll/my-salary` }),
     text: `Your payslip for ${p.period_start} – ${p.period_end} is available. Sign in to view it: ${app()}/payroll/my-salary`,
   }),
+  "digest.daily": (p) => {
+    const items = (Array.isArray(p.items) ? p.items : []) as { template: string; payload: P; category: string }[];
+    const rows = items.map((i) => ({ category: i.category, subject: templates[i.template]?.(i.payload ?? {}).subject ?? i.template }));
+    return {
+      subject: `Your VSM daily summary: ${rows.length} update${rows.length === 1 ? "" : "s"}`,
+      html: layout(`Hi ${p.name ?? "there"}, here's your day`,
+        `<table role="presentation" width="100%" cellpadding="0" cellspacing="0">${rows.map((r) =>
+          `<tr><td style="padding:6px 0;border-bottom:1px solid #2a2a2e;font-size:11px;letter-spacing:.12em;color:#7a7a76;width:110px">${esc(r.category)}</td><td style="padding:6px 0;border-bottom:1px solid #2a2a2e">${esc(r.subject)}</td></tr>`).join("")}</table>
+         <p style="font-size:12px;color:#7a7a76;margin-top:16px">You get these as a daily summary because of your notification preferences.</p>`,
+        { label: "Open VSM Ops", href: `${app()}/notifications` }),
+      text: `Your VSM daily summary (${p.date}):\n` + rows.map((r) => `- [${r.category}] ${r.subject}`).join("\n") + `\n\n${app()}/notifications\nChange how you receive these: ${app()}/notifications/preferences`,
+    };
+  },
+  "integration.test": (p) => ({
+    subject: "VSM Ops email test ✓",
+    html: layout("Email is working", `This test was sent by ${esc(p.by)} from the Integrations panel at ${esc(p.at)} using ${esc(p.provider)}.`),
+    text: `Email is working. Sent by ${p.by} via ${p.provider} at ${p.at}.`,
+  }),
   "auth.invite": (p) => ({
     subject: "Welcome to VSM Growth Operations",
     html: layout(`Welcome, ${p.name}`, "Your VSM Growth Operations account has been created. Use the invitation email from our sign-in provider to set your password."),

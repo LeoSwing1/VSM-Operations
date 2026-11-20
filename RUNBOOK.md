@@ -35,7 +35,9 @@ git branch -M main && git push -u origin main
    ./scripts/migrate.sh
    ```
    It applies 0001→0006 in order, each in its own transaction, stops at the first error, and skips anything already applied, so it's safe to re-run.
-   ✔ Check: it ends with `tables with RLS on: 36 / 36` and `migrations applied: 0001 … 0006`.
+   ✔ Check: it ends with `tables with RLS on: 39 / 39` and `migrations applied: 0001 … 0007`.
+
+   **Already applied earlier migrations by hand?** Don't run `migrate.sh` (it would try them again). Paste only the new file(s) listed in the latest `docs/blocks/BLOCK-NN.md` into the SQL Editor.
 
    **Option B, browser.** Supabase → **SQL Editor → New query** → paste the whole of `supabase/all_migrations.sql` → **Run** (empty project only).
    ✔ Check: "Success. No rows returned".
@@ -108,8 +110,9 @@ npm run dev         # open http://localhost:3000 → sign in with the user from 
 4. **Settings → Domains → Add** `ops.vsmgrowth.com`. Vercel shows a CNAME target.
 5. cPanel → Zone Editor → **Add Record → CNAME:** name `ops`, value `cname.vercel-dns.com` (or exactly what Vercel shows).
    ✔ Check: `https://ops.vsmgrowth.com/login` loads with a padlock.
-6. **Email retries (cron):** `vercel.json` runs `/api/cron/email` every 5 minutes, which needs Vercel **Pro**. On **Hobby**, either change the schedule in `vercel.json` to `"0 3 * * *"` (daily) or create a free job at cron-job.org:
+6. **Scheduled jobs (cron):** `vercel.json` runs `/api/cron/email` every 5 minutes (needs Vercel **Pro**) and `/api/cron/digest` daily at 7 pm IST. On **Hobby**, either change the schedule in `vercel.json` to `"0 3 * * *"` (daily) or create a free job at cron-job.org:
    - URL `https://ops.vsmgrowth.com/api/cron/email`, every 5 min
+   - URL `https://ops.vsmgrowth.com/api/cron/digest`, daily 19:00 Asia/Kolkata
    - Header `Authorization: Bearer <CRON_SECRET>`
 
    (Enquiry emails are also sent immediately on submit; the cron only handles retries and task/payroll emails.)

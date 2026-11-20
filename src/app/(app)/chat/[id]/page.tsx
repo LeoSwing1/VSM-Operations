@@ -25,26 +25,17 @@ export default async function ChatSpacePage({ params, searchParams }: ChatSpaceP
       description,
       is_private,
       created_at,
-      space_members!eq(employee_id) (
-        member_role
-      ),
-      messages!latest(message, created_at, sender:employees!inner(full_name, profile_image_url))
+      space_members!inner(member_role, employee_id),
+      messages!inner(id, message, created_at, sender:employees!inner(full_name, profile_image_url))
     `)
     .eq("id", p.id)
+    .eq("space_members.employee_id", ctx.employee_id)
+    .order("messages.created_at", { ascending: true })
+    .limit(50)
     .single();
 
   if (spaceError || !space) {
     notFound();
-  }
-
-  // Check if user is a member
-  const isMember = space.space_members?.some((m: { member_role: string }) => m.member_role);
-  if (!isMember) {
-    return (
-      <Card>
-        <p className="text-muted">Access denied. You are not a member of this space.</p>
-      </Card>
-    );
   }
 
   return (
@@ -58,17 +49,17 @@ export default async function ChatSpacePage({ params, searchParams }: ChatSpaceP
         </Card>
       ) : (
         <div className="space-y-4">
-          {space.messages.map((msg: { id: string; created_at: string; message: string; sender: { full_name: string; profile_image_url?: string } }) => (
+          {space.messages.map((msg: any) => (
             <div key={msg.id} className="flex gap-3">
-              {msg.sender?.profile_image_url ? (
-                <img src={msg.sender.profile_image_url} alt={msg.sender.full_name} className="h-8 w-8 rounded-full object-cover" />
+              {msg.sender?.[0]?.profile_image_url ? (
+                <img src={msg.sender[0].profile_image_url} alt={msg.sender[0].full_name} className="h-8 w-8 rounded-full object-cover" />
               ) : (
                 <div className="h-8 w-8 rounded-full bg-volt flex items-center justify-center text-xs font-bold">
-                  {msg.sender?.full_name?.[0] || "?"}
+                  {msg.sender?.[0]?.full_name?.[0] || "?"}
                 </div>
               )}
               <div className="flex-1">
-                <h4 className="text-sm font-medium">{msg.sender?.full_name || "Unknown"}</h4>
+                <h4 className="text-sm font-medium">{msg.sender?.[0]?.full_name || "Unknown"}</h4>
                 <p className="text-xs text-muted">{msg.message}</p>
                 <p className="text-xs text-muted mt-1">{msg.created_at ? new Date(msg.created_at).toLocaleString() : ""}</p>
               </div>

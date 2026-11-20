@@ -7,6 +7,8 @@ The internal operating system for **VSM Growth** and **VSM Scholars**: people, a
 | Read this | When |
 |---|---|
 | **[RUNBOOK.md](RUNBOOK.md)** | Setting up, deploying, first-day configuration: exact steps and commands |
+| **[docs/EXECUTION-PLAN.md](docs/EXECUTION-PLAN.md)** | All 10 build blocks in one file: scope, database, screens, tests, acceptance checklist, status |
+| **[docs/blocks/](docs/blocks/)** | What each execution block delivered and what to run (start with BLOCK-01.md) |
 | **[CLAUDE.md](CLAUDE.md)** | Before any developer or AI agent changes code: architecture and non-negotiable rules |
 | This README | Overview, access model, website form hookup, what's built |
 **Security model:** every rule lives in Postgres row-level security and `SECURITY DEFINER` functions. Hiding things in the UI is cosmetic only. The app talks to the database *as the signed-in user*. The service-role key is used in exactly three server-only places: the public enquiry intake, the email worker and user invites (after a permission check).
@@ -77,8 +79,8 @@ The lead is saved first. Then come the duplicate check (email or last-10-digit p
 ## 5. Tests
 
 ```bash
-npm test                                            # 27 unit tests (attendance, performance, payroll, Brevo/email)
-PGHOST=... PGPORT=... PGUSER=postgres npm run test:db  # 113 RLS/security checks on real Postgres
+npm test                                            # 31 unit tests
+PGHOST=... PGPORT=... PGUSER=postgres npm run test:db  # 135 RLS/security checks on real Postgres
 npm run typecheck && npm run build
 ```
 

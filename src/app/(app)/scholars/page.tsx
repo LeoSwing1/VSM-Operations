@@ -20,7 +20,7 @@ export default async function ScholarsPage({ searchParams }: { searchParams: Pro
       start_date,
       end_date,
       is_active,
-      _count(scholars:COUNT)
+      count:scholars
     `)
     .order("start_date", { ascending: true });
 
@@ -80,7 +80,7 @@ export default async function ScholarsPage({ searchParams }: { searchParams: Pro
                         {batch.start_date ? new Date(batch.start_date).toLocaleDateString() : "Start"} -{" "}
                         {batch.end_date ? new Date(batch.end_date).toLocaleDateString() : "End"}
                       </span>
-                      <span className="ml-3 text-muted">• {batch._count}</span>
+                      <span className="ml-3 text-muted">• {batch.count}</span>
                     </div>
                   </Card>
                 ))}

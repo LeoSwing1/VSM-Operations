@@ -20,6 +20,8 @@ export function navFor(ctx: Ctx): NavItem[] {
     { href: "/leads", label: "CRM · Leads", group: "Organisation", show: canAny(ctx, ["crm.view_all", "crm.manage"]) },
     { href: "/payroll", label: "Payroll", group: "Organisation", show: canAny(ctx, ["payroll.view_all", "payroll.approve"]) },
     { href: "/settings/access", label: "Access control", group: "Admin", show: can(ctx, "roles.manage") },
+    { href: "/settings/integrations", label: "Integrations", group: "Admin", show: can(ctx, "settings.manage") },
+    { href: "/settings/attendance", label: "Shifts & holidays", group: "Admin", show: can(ctx, "attendance.manage") },
     { href: "/settings/audit-logs", label: "Audit log", group: "Admin", show: can(ctx, "audit.view") },
   ];
   return items.filter((i) => i.show).map(({ show: _s, ...i }) => i);

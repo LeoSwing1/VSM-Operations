@@ -1,15 +1,17 @@
 import "server-only";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
+import { AUTH_COOKIE_OPTIONS, hardenCookie } from "./cookies";
 
 /** Per-request client acting AS the signed-in user. All reads/writes go through RLS. */
 export async function supabaseServer() {
   const store = await cookies();
   return createServerClient(env("NEXT_PUBLIC_SUPABASE_URL"), env("NEXT_PUBLIC_SUPABASE_ANON_KEY"), {
+    cookieOptions: AUTH_COOKIE_OPTIONS,
     cookies: {
       getAll: () => store.getAll(),
       setAll: (list) => {
-        try { list.forEach(({ name, value, options }) => store.set(name, value, options)); }
+        try { list.forEach(({ name, value, options }) => store.set(name, value, hardenCookie(options))); }
         catch { /* called from a Server Component — middleware refreshes the session */ }
       },
     },

@@ -19,19 +19,23 @@ Internal operating system for VSM Growth and VSM Scholars (Meerut & Noida, India
 10. **Money.** INR (₹, `en-IN`), integer paise in the payroll engine. Statutory deductions (PF/ESI/PT/TDS) are not auto-calculated; they're entered as approved deductions after a CA reviews them.
 11. **Time.** Store UTC, display `Asia/Kolkata` via `src/lib/engines/time.ts`.
 12. **Never fabricate.** No mock data, no "would appear here" placeholders, no claiming an integration works without testing it. Don't claim tests passed unless you ran them.
-13. **Secrets.** Never commit `.env.local`. Never print keys. Never prefix a secret with `NEXT_PUBLIC_`.
+13. **Secrets.** Never commit `.env.local`. Never print keys. Never prefix a secret with `NEXT_PUBLIC_`. Session cookies are HttpOnly (`src/lib/supabase/cookies.ts`); never add a browser Supabase client or expose tokens to page JavaScript.
+15. **Emails go through `enqueue_email()` only**, so recipient preferences apply. Never send directly with the provider, except the Integrations panel test.
+16. **Integrations are never shown as connected** unless `integration_status` holds a real successful test or delivery.
+17. **Work is delivered in blocks** as defined in `docs/EXECUTION-PLAN.md` (scope per block; don't pull features forward), each documented in `docs/blocks/BLOCK-NN.md`. The next block starts only after the owner approves the previous one.
 14. **Dependencies.** Add a package to `package.json` before importing it (an earlier change imported `lucide-react` without installing it, which broke the build). Keep `typescript@5.9`; TS 7 breaks Next 15.
 
 ## Layout
 ```
-supabase/migrations/   0001 foundation · 0002 workforce · 0003 performance+payroll · 0004 CRM+notifications · 0005 payroll adjustments · 0006 access hierarchy
+supabase/migrations/   0001 foundation · 0002 workforce · 0003 performance+payroll · 0004 CRM+notifications · 0005 payroll adjustments · 0006 access hierarchy · 0007 notification prefs + integrations
 src/lib/engines/       pure, unit-tested logic: attendance.ts performance.ts payroll.ts time.ts
 src/lib/data/          server loaders that feed engines (run under RLS)
 src/lib/email/         templates.ts · providers.ts (Brevo/Resend) · worker.ts (outbox drain)
 src/lib/auth.ts        getContext/requireContext/requirePerm/can — reads my_context() from the DB
 src/lib/perms.ts       permission catalogue shown in the UI (must match DB strings)
 src/app/(app)/         authenticated pages; each mutating page has an actions.ts (zod-validated server actions)
-src/app/api/           public/enquiry · cron/email · reports/* (CSV, permission-checked)
+src/app/api/           public/enquiry · cron/email · cron/digest · reports/* (CSV, permission-checked)
+docs/blocks/           one file per execution block: what changed, what to run, what was verified
 tests/engines.test.ts  tests/email.test.ts  tests/db/security.sql (RLS suite on real Postgres)
 ```
 

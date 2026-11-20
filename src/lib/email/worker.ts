@@ -21,6 +21,7 @@ export async function drainOutbox(limit = 20) {
   if (error) throw new Error(`claim failed: ${error.message}`);
 
   let sent = 0, failed = 0;
+  const lastErrors = new Map<string, string>();
   for (const job of jobs ?? []) {
     const content = render(job.template, job.payload ?? {});
     if (!content) {
@@ -40,8 +41,16 @@ export async function drainOutbox(limit = 20) {
         last_error: `[${provider.name}] ${err.message}`.slice(0, 500),
         next_attempt_at: err.permanent ? "infinity" : new Date(Date.now() + delay * 60_000).toISOString(),
       }).eq("id", job.id);
+      lastErrors.set(job.org_id, `[${provider.name}] ${err.message}`.slice(0, 300));
       failed++;
     }
+  }
+  // Real delivery outcome feeds the Integrations panel (one row per org that had jobs).
+  const orgs = new Map<string, { ok: boolean; err: string | null }>();
+  for (const job of jobs ?? []) if (!orgs.has(job.org_id)) orgs.set(job.org_id, { ok: true, err: null });
+  for (const [org, r] of orgs) {
+    const err = lastErrors.get(org) ?? null;
+    await sb.rpc("record_integration_event", { p_org: org, p_key: "email", p_ok: !err, p_error: err ?? r.err });
   }
   return { configured: true, provider: provider.name, processed: (jobs ?? []).length, sent, failed };
 }

@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { AUTH_COOKIE_OPTIONS, hardenCookie } from "@/lib/supabase/cookies";
 
 const PUBLIC = [/^\/login/, /^\/auth\//, /^\/api\/public\//, /^\/api\/cron\//, /^\/_next\//, /^\/favicon/];
 
@@ -8,12 +9,13 @@ export async function middleware(req: NextRequest) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL, key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !key) return res;
   const supabase = createServerClient(url, key, {
+    cookieOptions: AUTH_COOKIE_OPTIONS,
     cookies: {
       getAll: () => req.cookies.getAll(),
       setAll: (list) => {
         list.forEach(({ name, value }) => req.cookies.set(name, value));
         res = NextResponse.next({ request: req });
-        list.forEach(({ name, value, options }) => res.cookies.set(name, value, options));
+        list.forEach(({ name, value, options }) => res.cookies.set(name, value, hardenCookie(options)));
       },
     },
   });
@@ -26,6 +28,8 @@ export async function middleware(req: NextRequest) {
     to.search = path === "/" ? "" : `?next=${encodeURIComponent(path)}`;
     return NextResponse.redirect(to);
   }
+  // Signed-in users skip the login page — EXCEPT when the app sent them there because their
+  // account has no employee profile (?e=…). Redirecting those back to /dashboard caused a loop.
   if (user && path === "/login" && !req.nextUrl.searchParams.has("e")) {
     const to = req.nextUrl.clone(); to.pathname = "/dashboard"; to.search = "";
     return NextResponse.redirect(to);
