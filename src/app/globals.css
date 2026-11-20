@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ink: 244 244 242; --paper: 11 11 12; --panel: 20 20 22; --line: 42 42 46; --muted: 140 140 134;
+  color-scheme: dark;
+}
+:root.light {
+  --ink: 14 14 15; --paper: 247 246 242; --panel: 255 255 255; --line: 224 222 216; --muted: 110 108 102;
+  color-scheme: light;
+}
+html, body { background: rgb(var(--paper)); color: rgb(var(--ink)); }
+body { font-family: 'Inter Tight', ui-sans-serif, system-ui, sans-serif; font-feature-settings: "ss01", "cv11"; overflow-x: hidden; }
+*:focus-visible { outline: 2px solid #D7FF3A; outline-offset: 2px; border-radius: 6px; }
+::selection { background: #D7FF3A; color: #0b0b0c; }
+
+@layer components {
+  .eyebrow { @apply text-[11px] font-semibold uppercase tracking-[0.22em] text-muted; }
+  .display { @apply font-display font-normal tracking-tightest leading-[0.95]; }
+  .card { @apply rounded-2xl border border-line bg-panel; }
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition
+         disabled:opacity-40 disabled:cursor-not-allowed; }
+  .btn-primary { @apply btn bg-volt text-[#0b0b0c] hover:brightness-95 active:scale-[.98]; }
+  .btn-ghost { @apply btn border border-line hover:bg-ink/5; }
+  .btn-danger { @apply btn border border-danger/50 text-danger hover:bg-danger/10; }
+  .input { @apply w-full rounded-xl border border-line bg-paper px-3 py-2 text-sm placeholder:text-muted/70
+           focus:border-volt focus:outline-none; }
+  .label { @apply mb-1 block text-xs font-medium text-muted; }
+  .table { @apply w-full text-left text-sm; }
+  .table th { @apply border-b border-line px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted whitespace-nowrap; }
+  .table td { @apply border-b border-line/60 px-3 py-2.5 align-top; }
+  .table tr:hover td { @apply bg-ink/[0.02]; }
+  .chip { @apply inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide whitespace-nowrap; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.rise { animation: rise .45s cubic-bezier(.2,.7,.2,1) both; }
+@media print {
+  :root { --ink: 14 14 15; --paper: 255 255 255; --panel: 255 255 255; --line: 210 210 210; --muted: 90 90 90; }
+  .no-print { display: none !important; }
+  main { padding: 0 !important; }
+}

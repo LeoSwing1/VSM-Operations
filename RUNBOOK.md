@@ -1,0 +1,169 @@
+# RUNBOOK — exactly what to run, in order
+
+Follow the steps top to bottom. Each one has a **✔ Check** line; don't move on until it passes.
+Time needed: about 60 minutes the first time.
+
+---
+
+## 0. Before you start
+- [ ] Node.js 20 or newer: `node -v`
+- [ ] A GitHub account, a Vercel account, a Supabase account, a Brevo account
+- [ ] Access to cPanel → Zone Editor for `vsmgrowth.com` (DNS lives there, not at Namecheap)
+- [ ] **Use this project as the base.** Don't deploy the `vsm-current-sit` zip: it doesn't build, and its pages query tables that don't exist.
+
+---
+
+## 1. Put the code on GitHub
+```bash
+unzip vsm-growth-operations.zip && cd vsm-ops
+git init && git add . && git commit -m "VSM Growth Operations"
+# create an EMPTY private repo on github.com named vsm-growth-operations, then:
+git remote add origin https://github.com/<your-user>/vsm-growth-operations.git
+git branch -M main && git push -u origin main
+```
+✔ Check: the repo on GitHub shows `CLAUDE.md`, `RUNBOOK.md` and `supabase/migrations/0001…0006`, and does **not** contain `.env.local`.
+
+---
+
+## 2. Create the database (Supabase)
+1. supabase.com → **New project** → name `vsm-ops`, strong DB password (save it in your password manager). Note the region; `vercel.json` must use the matching Vercel region (Tokyo `ap-northeast-1` ↔ `hnd1`, Mumbai `ap-south-1` ↔ `bom1`).
+2. **Run the migrations.** Choose **one** option:
+
+   **Option A, terminal (recommended).** Supabase → **Connect** → *Session pooler* → copy the URI. Use port **5432**, not the transaction pooler on 6543. Then run:
+   ```bash
+   export DATABASE_URL='postgresql://postgres.<project-ref>:<DB-PASSWORD>@aws-0-<region>.pooler.supabase.com:5432/postgres'
+   ./scripts/migrate.sh
+   ```
+   It applies 0001→0006 in order, each in its own transaction, stops at the first error, and skips anything already applied, so it's safe to re-run.
+   ✔ Check: it ends with `tables with RLS on: 36 / 36` and `migrations applied: 0001 … 0006`.
+
+   **Option B, browser.** Supabase → **SQL Editor → New query** → paste the whole of `supabase/all_migrations.sql` → **Run** (empty project only).
+   ✔ Check: "Success. No rows returned".
+
+3. **Authentication → Users → Add user → Create new user:** your email + a strong password, tick *Auto Confirm User*. Copy the user's **UID**.
+4. SQL Editor, run once (replace the values):
+   ```sql
+   select bootstrap_organization('VSM Growth', 'vsm-growth', '<YOUR-UID>', 'Vishant Malik', 'you@vsmgrowth.com');
+   ```
+   ✔ Check: it returns a UUID. Running it a second time must fail with "bootstrap already completed". That's correct; it means no hidden second admin can be created this way.
+5. **Authentication → Sign In / Providers:** turn **off** "Allow new users to sign up" (staff are invited, nobody self-registers).
+6. **Authentication → URL Configuration:** Site URL `https://ops.vsmgrowth.com`; Redirect URLs: add `https://ops.vsmgrowth.com/auth/callback` and `http://localhost:3000/auth/callback`.
+7. **Project Settings → API:** copy the **Project URL**, the **anon public** key and the **service_role** key (keep the service_role key secret).
+
+---
+
+## 3. Set up email (Brevo)
+1. Brevo → **Senders, Domains & Dedicated IPs → Domains → Add a domain** → `vsmgrowth.com`.
+2. Brevo shows several DNS records (a Brevo code TXT, DKIM and DMARC). In **cPanel → Zone Editor → vsmgrowth.com → Manage**, add each record exactly as shown.
+   - If you already have a DMARC (`_dmarc`) TXT record, keep **one** only; don't create a second.
+   - Don't touch existing MX records.
+3. Back in Brevo, click **Authenticate this domain** (DNS can take 15 minutes to a few hours).
+4. **Senders → Add a sender:** `VSM Growth` / `ops@vsmgrowth.com` (any address on the authenticated domain).
+5. **SMTP & API → API Keys → Generate a new API key** → name `vsm-ops` → copy it (starts with `xkeysib-`).
+
+✔ Check: the domain shows **Authenticated** and the sender shows **Verified** in Brevo.
+
+---
+
+## 4. Environment variables
+Create the secrets (run in a terminal):
+```bash
+node -e "console.log('CRON_SECRET=' + require('crypto').randomBytes(32).toString('hex'))"
+node -e "console.log('ENQUIRY_INTAKE_KEY=' + require('crypto').randomBytes(32).toString('hex'))"
+```
+Copy `.env.example` → `.env.local` and fill in **every** line:
+
+| Key | Value |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase Project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | anon public key |
+| `SUPABASE_SERVICE_ROLE_KEY` | service_role key (secret) |
+| `EMAIL_PROVIDER` | `brevo` |
+| `BREVO_API_KEY` | `xkeysib-…` |
+| `EMAIL_FROM` | `VSM Growth <ops@vsmgrowth.com>` (must be your verified Brevo sender) |
+| `EMAIL_REPLY_TO` | where client replies should go |
+| `ALERT_EMAIL` | who gets "new enquiry" alerts |
+| `ORG_SLUG` | `vsm-growth` |
+| `ENQUIRY_INTAKE_KEY`, `CRON_SECRET` | from the commands above |
+| `ENQUIRY_ALLOWED_ORIGINS` | `https://vsmgrowth.com,https://www.vsmgrowth.com` |
+| `APP_URL` | `https://ops.vsmgrowth.com` |
+| `APP_TIMEZONE` | `Asia/Kolkata` |
+
+Test locally:
+```bash
+npm install
+npm test            # ✔ 27 tests pass
+npm run typecheck   # ✔ no output
+npm run build       # ✔ "Compiled successfully"
+npm run dev         # open http://localhost:3000 → sign in with the user from step 2.3
+```
+✔ Check: you land on the Dashboard as **Super Admin**, and the sidebar shows **Access control**.
+
+---
+
+## 5. Deploy (Vercel)
+1. vercel.com → **Add New → Project** → import `vsm-growth-operations`. Framework: Next.js (auto-detected). `vercel.json` pins functions to `hnd1` (Tokyo), next to the database. Change it if your Supabase region is different.
+2. **Environment Variables:** add every key from your `.env.local` for **Production** (and Preview if you use it).
+3. **Deploy.** ✔ Check: the build log ends with "Compiled successfully" and the deployment shows Ready.
+4. **Settings → Domains → Add** `ops.vsmgrowth.com`. Vercel shows a CNAME target.
+5. cPanel → Zone Editor → **Add Record → CNAME:** name `ops`, value `cname.vercel-dns.com` (or exactly what Vercel shows).
+   ✔ Check: `https://ops.vsmgrowth.com/login` loads with a padlock.
+6. **Email retries (cron):** `vercel.json` runs `/api/cron/email` every 5 minutes, which needs Vercel **Pro**. On **Hobby**, either change the schedule in `vercel.json` to `"0 3 * * *"` (daily) or create a free job at cron-job.org:
+   - URL `https://ops.vsmgrowth.com/api/cron/email`, every 5 min
+   - Header `Authorization: Bearer <CRON_SECRET>`
+
+   (Enquiry emails are also sent immediately on submit; the cron only handles retries and task/payroll emails.)
+
+---
+
+## 6. Set up your hierarchy (first day)
+1. **Access control → Hierarchy:** check the role ladder. Rename roles to your designations if you like (for example Team Lead → "Content Lead"; the underlying permissions stay the same). Higher roles manage lower ones, never the reverse.
+2. **People → Departments:** add your departments (Content Production, SEO, Web Development, Sales, VSM Scholars…).
+3. **People → Add employee:** for each person, set department, **reporting manager** and **role**, with "Email a sign-in invitation" ticked. The reporting manager decides whose attendance, leave, tasks and performance they see and approve.
+   - Add your co-founder as **Super Admin** too, so there are always two (the system won't let the last Super Admin be removed).
+4. **Access control → Permission matrix:** review each role's column and click **Save all changes**.
+   - Sensitive permissions (payroll, salary, roles, audit, settings) can only be granted by a Super Admin.
+   - Admins can change roles below them, but only with permissions they hold themselves.
+5. **Access control → People & overrides:** to give one person one extra permission without changing their role (for example "View all leads" while covering sales), add a **Grant** with a reason and an expiry date. Use **Deny** to block one permission for one person. Every change appears in the audit log.
+6. **Access control → Who has access:** pick `payroll.view_all` and confirm only the people you expect are listed.
+7. **Payroll → Salary structures:** add a structure for each employee. Review the example incentive slabs and change them to your policy.
+
+✔ Check: sign in as a normal employee (use a test invite). They should see only their own attendance, tasks, performance and salary, and no Access control or Payroll admin menu.
+
+---
+
+## 7. Connect the website forms (vsmgrowth.com stays on cPanel)
+Use the HTML/JS snippet in `README.md` § "Connect the vsmgrowth.com forms". Then:
+```bash
+curl -i -X POST https://ops.vsmgrowth.com/api/public/enquiry \
+  -H "Origin: https://vsmgrowth.com" -H "Content-Type: application/json" \
+  -d '{"name":"Test Lead","email":"you+test@vsmgrowth.com","service":"SEO","message":"Runbook test"}'
+```
+✔ Check: HTTP `201`; the lead appears under **CRM · Leads**; `ALERT_EMAIL` gets the alert and the test address gets the acknowledgement.
+If emails don't arrive: in Supabase, run `select status, last_error from email_outbox order by created_at desc limit 5;` and read `last_error`.
+
+---
+
+## 8. Every time you change code
+```bash
+git pull
+npm install
+npm test && npm run typecheck && npm run build       # all must pass
+# database tests (needs Docker once):
+docker run -d --name vsm-pg -p 5432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16
+PGHOST=localhost PGPORT=5432 PGUSER=postgres npm run test:db   # ✔ "security suite complete" + "sweep complete", no FAIL
+git add . && git commit -m "…" && git push           # Vercel deploys automatically
+```
+New migration? Run it in the Supabase SQL Editor **after** `test:db` passes, and before the code that uses it goes live.
+
+---
+
+## Troubleshooting
+| Symptom | Fix |
+|---|---|
+| Login works, then "isn't linked to an active employee profile" | That auth user has no `employees` row. Add them in People, or run `bootstrap_organization` for the very first admin. |
+| "You can only assign roles below your own level" | Working as intended. Ask someone higher, or a Super Admin. |
+| Emails stuck as QUEUED | `BREVO_API_KEY` / `EMAIL_FROM` missing, or the cron isn't running. FAILED with `Brevo 401` means a bad key; `Brevo 400` usually means the sender isn't verified. |
+| Invite email not received | Supabase → Authentication → Emails. For production, set custom SMTP to Brevo (SMTP & API → SMTP tab: host `smtp-relay.brevo.com`, port 587, your SMTP login and key). |
+| Build fails on Vercel with module not found | A package was imported without being added to `package.json`. Run `npm i <pkg>` and commit. |
+| "infinite recursion detected in policy" | A new RLS policy references a table whose policy references back. Use a `SECURITY DEFINER` helper (see CLAUDE.md rule 6). |
