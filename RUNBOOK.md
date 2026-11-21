@@ -21,7 +21,7 @@ git init && git add . && git commit -m "VSM Growth Operations"
 git remote add origin https://github.com/<your-user>/vsm-growth-operations.git
 git branch -M main && git push -u origin main
 ```
-✔ Check: the repo on GitHub shows `CLAUDE.md`, `RUNBOOK.md` and `supabase/migrations/0001…0006`, and does **not** contain `.env.local`.
+✔ Check: the repo on GitHub shows `CLAUDE.md`, `RUNBOOK.md` and `supabase/migrations/0001…0012`, and does **not** contain `.env.local`.
 
 ---
 
@@ -34,10 +34,10 @@ git branch -M main && git push -u origin main
    export DATABASE_URL='postgresql://postgres.<project-ref>:<DB-PASSWORD>@aws-0-<region>.pooler.supabase.com:5432/postgres'
    ./scripts/migrate.sh
    ```
-   It applies 0001→0006 in order, each in its own transaction, stops at the first error, and skips anything already applied, so it's safe to re-run.
-   ✔ Check: it ends with `tables with RLS on: 39 / 39` and `migrations applied: 0001 … 0007`.
+   It applies every migration (currently 0001→0013) in order, each in its own transaction, stops at the first error, and skips anything already applied, so it's safe to re-run.
+   ✔ Check: it ends with `RLS-enabled table count is printed for review` and `migrations applied: 0001 … 0013`.
 
-   **Already applied earlier migrations by hand?** Don't run `migrate.sh` (it would try them again). Paste only the new file(s) listed in the latest `docs/blocks/BLOCK-NN.md` into the SQL Editor.
+   **Already applied earlier migrations by hand?** Don't run `migrate.sh` (it would try them again). Paste only the new file(s) listed in the latest `docs/blocks/BLOCK-NN.md` into the SQL Editor. For this source build, Block 02 adds `0008_hr_recruitment.sql`, Block 03 adds `0009_hr_documents_probation_exit.sql`, and Block 04 adds `0010_finance_erp.sql`, Block 05 adds `0011_operations_communication.sql`; Block 06 adds `0012_chat_security_access_controls.sql`; Block 07 adds `0013_executive_reporting.sql`.
 
    **Option B, browser.** Supabase → **SQL Editor → New query** → paste the whole of `supabase/all_migrations.sql` → **Run** (empty project only).
    ✔ Check: "Success. No rows returned".
@@ -94,7 +94,7 @@ Copy `.env.example` → `.env.local` and fill in **every** line:
 Test locally:
 ```bash
 npm install
-npm test            # ✔ 27 tests pass
+npm test            # unit suite must pass (see package scripts)
 npm run typecheck   # ✔ no output
 npm run build       # ✔ "Compiled successfully"
 npm run dev         # open http://localhost:3000 → sign in with the user from step 2.3
@@ -125,7 +125,7 @@ npm run dev         # open http://localhost:3000 → sign in with the user from 
 3. **People → Add employee:** for each person, set department, **reporting manager** and **role**, with "Email a sign-in invitation" ticked. The reporting manager decides whose attendance, leave, tasks and performance they see and approve.
    - Add your co-founder as **Super Admin** too, so there are always two (the system won't let the last Super Admin be removed).
 4. **Access control → Permission matrix:** review each role's column and click **Save all changes**.
-   - Sensitive permissions (payroll, salary, roles, audit, settings) can only be granted by a Super Admin.
+   - Sensitive permissions (payroll, salary, finance, roles, audit, settings) can only be granted by a Super Admin. Block 04 grants the complete finance set to the default ADMIN role; grant only approved granular finance permissions to other Finance/Accounts users.
    - Admins can change roles below them, but only with permissions they hold themselves.
 5. **Access control → People & overrides:** to give one person one extra permission without changing their role (for example "View all leads" while covering sales), add a **Grant** with a reason and an expiry date. Use **Deny** to block one permission for one person. Every change appears in the audit log.
 6. **Access control → Who has access:** pick `payroll.view_all` and confirm only the people you expect are listed.
@@ -157,7 +157,7 @@ docker run -d --name vsm-pg -p 5432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust post
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm run test:db   # ✔ "security suite complete" + "sweep complete", no FAIL
 git add . && git commit -m "…" && git push           # Vercel deploys automatically
 ```
-New migration? Run it in the Supabase SQL Editor **after** `test:db` passes, and before the code that uses it goes live.
+New migration? Run it in the Supabase SQL Editor **after** `test:db` passes, and before the code that uses it goes live. Block 03 creates the private `employee-private` Storage bucket; Block 04 creates the private `finance-receipts` bucket; Block 05 creates the private `chat-files` bucket (15 MB limit, PDF/image/text/ZIP types). Block 06 adds report/moderation tables and RPC-controlled channel membership; verify moderator-only report access, cross-organization member rejection and direct-message membership immutability. Confirm Storage is enabled, enforce the 10 MB PDF/image restrictions, and test employee-vs-employee receipt signed URL isolation, manager/finance approval separation, private-group isolation and chat attachment signed URL access in staging.
 
 ---
 
@@ -170,3 +170,24 @@ New migration? Run it in the Supabase SQL Editor **after** `test:db` passes, and
 | Invite email not received | Supabase → Authentication → Emails. For production, set custom SMTP to Brevo (SMTP & API → SMTP tab: host `smtp-relay.brevo.com`, port 587, your SMTP login and key). |
 | Build fails on Vercel with module not found | A package was imported without being added to `package.json`. Run `npm i <pkg>` and commit. |
 | "infinite recursion detected in policy" | A new RLS policy references a table whose policy references back. Use a `SECURITY DEFINER` helper (see CLAUDE.md rule 6). |
+
+
+## Executive reporting (Block 07)
+
+- Apply migration `0013_executive_reporting.sql` before enabling the executive route.
+- Grant `executive.view` only to leadership roles that should access the overview. The migration seeds ADMIN and OPERATIONS_MANAGER.
+- Finance metrics require the separate `finance.view` permission; people, project, task and CRM sections require their own permissions.
+- CSV export uses the same permission gates as the dashboard.
+- The displayed cash movement is an operational indicator only, not a statutory accounting report.
+
+## Block 08 deployment notes
+
+1. Back up the staging database and apply `supabase/migrations/0014_workforce_collaboration_calendar.sql` after migrations 0001–0013.
+2. Verify new role permissions for every role in a seeded organisation and verify the `organizations_seed_workforce_collaboration_permissions` trigger for a newly bootstrapped organisation.
+3. Test schedule assignment date ranges, overlap rejection, and attendance calculations for two employees with different shift policies.
+4. Test tenant isolation for teams, group memberships, time entries, quality assessments, calendar events, attendees and meeting notes.
+5. Test time approval self-approval denial and team/all permission boundaries.
+6. Test private calendar events and attendee response visibility; test invite notification deduplication.
+7. Run `npm ci && npm run typecheck && npm test && npm run test:db` before deployment.
+
+Timesheets are work allocation, not attendance. Do not use them as payroll hours until a separately reviewed reconciliation policy is configured. No production changes are performed by this repository block.

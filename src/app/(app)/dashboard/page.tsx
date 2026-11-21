@@ -40,12 +40,14 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
   // Team attendance today
   let teamStats: { total: number; active: number; present: number; late: number } | null = null;
   if (team.data) {
+    const { data: datedSchedules } = await sb.from("schedule_assignments").select("employee_id,effective_from,effective_to,shift:shifts(start_time,grace_minutes,weekly_offs)").lte("effective_from", today).or(`effective_to.is.null,effective_to.gte.${today}`);
+    const scheduleByEmployee = new Map((datedSchedules ?? []).map((a: any) => [a.employee_id, Array.isArray(a.shift) ? a.shift[0] : a.shift]));
     const firstIn = new Map<string, string>();
     for (const e of todayEvents.data ?? []) if (!firstIn.has(e.employee_id)) firstIn.set(e.employee_id, e.occurred_at);
     const active = team.data.filter((e: any) => e.status !== "EXITED");
     let late = 0;
     for (const e of active as any[]) {
-      const t = firstIn.get(e.id); const sh = Array.isArray(e.shift) ? e.shift[0] : e.shift;
+      const t = firstIn.get(e.id); const sh = scheduleByEmployee.get(e.id) ?? (Array.isArray(e.shift) ? e.shift[0] : e.shift);
       if (t && sh && localMinutes(t, tz) > timeToMinutes(sh.start_time) + sh.grace_minutes) late++;
     }
     teamStats = { total: team.data.length, active: active.length, present: active.filter((e: any) => firstIn.has(e.id)).length, late };
@@ -68,6 +70,16 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
       <PageHeader eyebrow={new Intl.DateTimeFormat("en-IN", { dateStyle: "full", timeZone: tz }).format(new Date())}
         title={`${greet}, ${ctx.full_name.split(" ")[0]}.`} />
       <Flash sp={sp} />
+
+      <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        {canAny(ctx, ["projects.workspace_view", "projects.view_all", "projects.manage"]) && <Link href="/projects" className="card flex items-center justify-between p-4 text-sm font-semibold hover:border-volt">Projects & delivery <span>→</span></Link>}
+        {can(ctx, "communication.view") && <Link href="/chat" className="card flex items-center justify-between p-4 text-sm font-semibold hover:border-volt">Team chat <span>→</span></Link>}
+        {can(ctx, "communication.view") && <Link href="/announcements" className="card flex items-center justify-between p-4 text-sm font-semibold hover:border-volt">Announcements <span>→</span></Link>}
+        <Link href="/tasks" className="card flex items-center justify-between p-4 text-sm font-semibold hover:border-volt">Task board <span>→</span></Link>
+        <Link href="/time" className="card flex items-center justify-between p-4 text-sm font-semibold hover:border-volt">Timesheets <span>→</span></Link>
+        <Link href="/calendar" className="card flex items-center justify-between p-4 text-sm font-semibold hover:border-volt">Calendar <span>→</span></Link>
+        <Link href="/teams" className="card flex items-center justify-between p-4 text-sm font-semibold hover:border-volt">Teams & groups <span>→</span></Link>
+      </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
         <PunchCard events={myEvents.data ?? []} tz={tz} />

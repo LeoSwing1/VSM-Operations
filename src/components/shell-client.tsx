@@ -2,7 +2,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
 import clsx from "clsx";
 import type { NavItem } from "./shell";
 
@@ -16,7 +15,7 @@ export function NavLinks({ items, unread }: { items: NavItem[]; unread: number }
           <p className="eyebrow mb-2 px-2">{g}</p>
           <ul className="space-y-0.5">
             {items.filter((i) => i.group === g).map((i) => {
-              const active = path === i.href || path.startsWith(i.href + "/");
+              const active = path === i.href || (i.href !== "/dashboard" && path.startsWith(i.href + "/") && !(i.href === "/projects" && path.startsWith("/projects/time")));
               return (
                 <li key={i.href}>
                   <Link href={i.href} aria-current={active ? "page" : undefined}
@@ -60,19 +59,14 @@ export function MobileMenu({ children }: { children: React.ReactNode }) {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
     window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey);
   }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey);
-  }, []);
-  const panel = open ? (
-    <div id="mobile-nav" className="fixed inset-0 top-[57px] z-40 overflow-y-auto bg-paper p-5">{children}</div>
-  ) : null;
   return (
     <>
       <button type="button" className="btn-ghost px-3 py-1.5" aria-expanded={open} aria-controls="mobile-nav" onClick={() => setOpen((o) => !o)}>
         {open ? "Close" : "Menu"}
       </button>
-      {open && createPortal(panel, document.body)}
+      {open && (
+        <div id="mobile-nav" className="fixed inset-0 top-[57px] z-40 overflow-y-auto bg-paper p-5">{children}</div>
+      )}
     </>
   );
 }

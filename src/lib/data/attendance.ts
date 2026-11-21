@@ -14,7 +14,7 @@ export async function loadAttendance(sb: SupabaseClient, employeeId: string, sta
     .eq("id", employeeId).maybeSingle();
   if (!emp) return null;
 
-  const [{ data: events }, { data: holidays }, { data: leaves }] = await Promise.all([
+  const [{ data: events }, { data: holidays }, { data: leaves }, { data: assignments }] = await Promise.all([
     sb.from("attendance_events").select("event_type, occurred_at, source").eq("employee_id", employeeId)
       .gte("occurred_at", zonedInstant(start, "00:00", tz).toISOString())
       .lte("occurred_at", zonedInstant(end, "23:59:59", tz).toISOString())
@@ -22,13 +22,26 @@ export async function loadAttendance(sb: SupabaseClient, employeeId: string, sta
     sb.from("holidays").select("holiday_date").gte("holiday_date", start).lte("holiday_date", end),
     sb.from("leave_requests").select("start_date, end_date, half_day, leave_type:leave_types(is_paid)")
       .eq("employee_id", employeeId).eq("status", "APPROVED").lte("start_date", end).gte("end_date", start),
+    sb.from("schedule_assignments").select("effective_from,effective_to,shift:shifts(start_time,end_time,grace_minutes,half_day_minutes,full_day_minutes,weekly_offs)")
+      .eq("employee_id", employeeId).lte("effective_from", end).or(`effective_to.is.null,effective_to.gte.${start}`).order("effective_from"),
   ]);
 
   const shift = (Array.isArray(emp.shift) ? emp.shift[0] : emp.shift) as ShiftPolicy | null;
+  const shiftByDate: Record<string, ShiftPolicy> = {};
+  for (const a of assignments ?? []) {
+    const policy = (Array.isArray(a.shift) ? a.shift[0] : a.shift) as ShiftPolicy | null;
+    if (!policy) continue;
+    const from = a.effective_from as string, to = (a.effective_to as string | null) ?? end;
+    for (let d = from > start ? from : start; d <= (to < end ? to : end); ) {
+      shiftByDate[d] = policy;
+      const dt = new Date(`${d}T12:00:00Z`); dt.setUTCDate(dt.getUTCDate()+1); d = dt.toISOString().slice(0,10);
+    }
+  }
   const now = new Date();
   return summariseAttendance({
     events: (events ?? []) as AttendanceEvent[],
     shift: shift ?? FALLBACK_SHIFT,
+    shiftByDate,
     start, end,
     holidays: (holidays ?? []).map((h) => h.holiday_date as string),
     leave: expandLeave((leaves ?? []).map((l: any) => ({

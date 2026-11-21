@@ -28,9 +28,10 @@ export default async function Tasks({ searchParams }: { searchParams: Promise<Re
   if (view === "team") q = q.neq("assignee_id", ctx.employee_id);
   if (view === "overdue") q = q.lt("deadline", now).not("status", "in", "(COMPLETED,CANCELLED)");
   if (view !== "overdue" && sp.done !== "1") q = q.neq("status", "CANCELLED");
-  const [{ data: tasks }, { data: dir }, { data: projects }, { data: clients }] = await Promise.all([
+  const [{ data: tasks }, { data: dir }, { data: projects }, { data: clients }, { data: timeRows }] = await Promise.all([
     q, sb.from("employee_directory").select("id, full_name").order("full_name"), sb.from("projects").select("id, name").neq("status", "CANCELLED").order("name"),
     can(ctx, "projects.manage") ? sb.from("clients").select("id, name").order("name") : Promise.resolve({ data: [] }),
+    sb.from("task_time_entries").select("task_id,minutes,status").eq("status", "APPROVED"),
   ]);
   const canAssignOthers = can(ctx, "tasks.manage");
   const back = `/tasks?view=${view}`;
@@ -48,6 +49,8 @@ export default async function Tasks({ searchParams }: { searchParams: Promise<Re
   return (
     <>
       <PageHeader eyebrow="Work" title="Tasks">
+        <Link className="btn-ghost" href="/time">Timesheets</Link>
+        <Link className="btn-ghost" href="/quality">Quality register</Link>
         {[["mine", "My tasks"], ...(team ? [["team", "Team tasks"]] : []), ["overdue", "Overdue"], ["kanban", "Kanban"]].map(([k, l]) => (
           <Link key={k} href={`/tasks?view=${k}`} className={view === k ? "btn-primary" : "btn-ghost"}>{l}</Link>))}
       </PageHeader>
@@ -92,7 +95,7 @@ export default async function Tasks({ searchParams }: { searchParams: Promise<Re
         </div></div>
       ) : (
         <Card><TableWrap><table className="table min-w-[860px]">
-          <thead><tr><th>Task</th><th>Assignee</th><th>Status</th><th>Priority</th><th>Deadline</th><th>Quality</th><th></th></tr></thead>
+          <thead><tr><th>Task</th><th>Assignee</th><th>Status</th><th>Priority</th><th>Deadline</th><th>Logged</th><th>Quality</th><th></th></tr></thead>
           <tbody>{tasks.map((t: any) => (
             <tr key={t.id} id={t.id} className={sp.focus === t.id ? "bg-volt/5" : ""}>
               <td><p className="font-semibold">{t.title}</p><p className="text-xs text-muted">{t.project?.name ?? "No project"}{t.reopen_count ? ` · reworked ×${t.reopen_count}` : ""}</p></td>
@@ -100,6 +103,7 @@ export default async function Tasks({ searchParams }: { searchParams: Promise<Re
               <td><Badge>{overdue(t) ? "OVERDUE" : t.status}</Badge></td>
               <td className="text-xs">{t.priority}</td>
               <td className="whitespace-nowrap text-xs">{t.deadline ? fmtDateTime(t.deadline, ctx.timezone) : "—"}</td>
+              <td className="tabular-nums">{((timeRows ?? []).filter((r: any) => r.task_id === t.id).reduce((n: number, r: any) => n + r.minutes, 0) / 60).toFixed(1)}h</td>
               <td className="tabular-nums">{t.quality_score ?? "—"}</td>
               <td><Actions t={t} /></td>
             </tr>))}</tbody>

@@ -3,18 +3,18 @@
 Read this before touching anything. These rules exist because an earlier change replaced working modules with stubs that queried non-existent tables, deleted the app layout and server actions, and shipped a migration that could not run. Don't repeat that.
 
 ## What this is
-Internal operating system for VSM Growth and VSM Scholars (Meerut & Noida, India). People, attendance, leave, tasks, daily updates, performance, payroll, CRM, notifications, access control and audit.
+Internal operating system for VSM Growth and VSM Scholars (Meerut & Noida, India). People, attendance, leave, tasks, daily updates, performance, payroll, finance, CRM, notifications, access control and audit.
 **Stack:** Next.js 15 App Router (server components + server actions) · TypeScript 5.9 (strict) · Supabase Postgres, Auth and RLS · Brevo or Resend email · Vercel.
 
 ## Non-negotiable rules
 1. **Security lives in Postgres.** Every table has RLS. Permission checks use `has_perm()`, `can_view_*()`, `is_in_my_team()` and `can_manage_role()`. UI checks (`can()`, hidden buttons) are cosmetic only. A new feature isn't done until its RLS policies exist and are tested.
-2. **The app queries as the signed-in user** (`supabaseServer()`). `supabaseAdmin()` (service role) is allowed only in `api/public/enquiry`, `lib/email/worker.ts` and invites in `people/actions.ts` *after* `requirePerm`. Never add another use without an explicit reason in the PR.
+2. **The app queries as the signed-in user** (`supabaseServer()`). `supabaseAdmin()` (service role) is allowed only in `api/public/enquiry`, `lib/email/worker.ts` and invites in `people/actions.ts` *after* `requirePerm`. Never add another use without an explicit reason in the PR. The browser Supabase client was intentionally removed to keep session tokens HttpOnly; chat currently refreshes through authenticated polling, not browser token exposure.
 3. **Never query a table that doesn't exist.** Check `supabase/migrations/` first. Real table names include `attendance_events` (not `attendance`), `payroll_entries` (not `salary_slips`), `leave_requests` and `leave_types` (not `leave_balances`), and `employees` + `employee_directory` (not `team_members`).
 4. **Don't delete working code to "simplify".** Keep `src/app/(app)/layout.tsx`, every `actions.ts`, the engines in `src/lib/engines/*` and the Block 1 pages. Extend them; don't replace them.
 5. **Migrations are append-only.** Never edit an applied migration; add `NNNN_description.sql`. Each must apply cleanly on top of all previous ones (`npm run test:db` proves it). Functions in index predicates must be `IMMUTABLE` (`now()` is not).
 6. **No policy recursion.** If policy A reads table B and B's policy reads A, Postgres raises "infinite recursion". Wrap the cross-table check in a `SECURITY DEFINER` helper (see `is_project_member`, `payroll_run_released`).
 7. **Salary privacy.** Only the employee themself and `payroll.view_all` / `payroll.approve` holders may read salary or payroll rows. Managers never inherit salary visibility. Emails never contain amounts. Every salary view calls `log_salary_access`.
-8. **Hierarchy.** Role levels live in `role_settings` (Super Admin = 100, always all permissions). You can only manage roles strictly below your level, only grant permissions you hold, and payroll/salary/roles/audit/settings permissions are Super-Admin-only. Per-person overrides (GRANT/DENY) are Super-Admin-only. The last Super Admin can't be removed. Don't weaken any of this.
+8. **Hierarchy.** Role levels live in `role_settings` (Super Admin = 100, always all permissions). You can only manage roles strictly below your level, only grant permissions you hold, and payroll/salary/finance/roles/audit/settings permissions are Super-Admin-granted sensitive permissions; existing seeded role grants remain in force. Per-person overrides (GRANT/DENY) are Super-Admin-only. The last Super Admin can't be removed. Don't weaken any of this.
 9. **No arbitrary code execution.** No `RUN_SQL`, `eval` or user-defined HTTP calls in automations. Use allow-listed actions only.
 10. **Money.** INR (₹, `en-IN`), integer paise in the payroll engine. Statutory deductions (PF/ESI/PT/TDS) are not auto-calculated; they're entered as approved deductions after a CA reviews them.
 11. **Time.** Store UTC, display `Asia/Kolkata` via `src/lib/engines/time.ts`.
@@ -22,12 +22,12 @@ Internal operating system for VSM Growth and VSM Scholars (Meerut & Noida, India
 13. **Secrets.** Never commit `.env.local`. Never print keys. Never prefix a secret with `NEXT_PUBLIC_`. Session cookies are HttpOnly (`src/lib/supabase/cookies.ts`); never add a browser Supabase client or expose tokens to page JavaScript.
 15. **Emails go through `enqueue_email()` only**, so recipient preferences apply. Never send directly with the provider, except the Integrations panel test.
 16. **Integrations are never shown as connected** unless `integration_status` holds a real successful test or delivery.
-17. **Work is delivered in blocks** as defined in `docs/EXECUTION-PLAN.md` (scope per block; don't pull features forward), each documented in `docs/blocks/BLOCK-NN.md`. The next block starts only after the owner approves the previous one.
+17. **Work is delivered in blocks** (`docs/blocks/BLOCK-NN.md`). The next block starts only after the owner approves the previous one.
 14. **Dependencies.** Add a package to `package.json` before importing it (an earlier change imported `lucide-react` without installing it, which broke the build). Keep `typescript@5.9`; TS 7 breaks Next 15.
 
 ## Layout
 ```
-supabase/migrations/   0001 foundation · 0002 workforce · 0003 performance+payroll · 0004 CRM+notifications · 0005 payroll adjustments · 0006 access hierarchy · 0007 notification prefs + integrations
+supabase/migrations/   0001 foundation · 0002 workforce · 0003 performance+payroll · 0004 CRM+notifications · 0005 payroll adjustments · 0006 access hierarchy · 0007 notification prefs + integrations · 0008 recruitment · 0009 HR documents/probation/exit · 0010 Finance ERP · 0011 Projects/Communication
 src/lib/engines/       pure, unit-tested logic: attendance.ts performance.ts payroll.ts time.ts
 src/lib/data/          server loaders that feed engines (run under RLS)
 src/lib/email/         templates.ts · providers.ts (Brevo/Resend) · worker.ts (outbox drain)
@@ -55,3 +55,10 @@ npm run test:db        # applies all migrations to a scratch DB and runs the RLS
 npm run typecheck
 npm run build
 ```
+
+## Block 08 workforce collaboration
+
+- Attendance remains RPC-driven through `record_attendance`; effective-dated schedule assignments override the employee's base shift for local work dates in `loadAttendance`.
+- Task timesheets (`task_time_entries`) are separate from attendance and from existing project workspace timesheets (`project_time_entries`). Task timesheet rows require an assigned task; project-only time remains in the project workspace.
+- Teams/groups, quality assessments/checklists, calendar invitations and meeting notes are tenant-scoped with RLS and relationship guards. Do not bypass their RLS with client-side writes.
+- Meeting invitees receive in-app MEETINGS notifications. Calendar recurrence is stored only; no recurrence expansion or external calendar sync exists yet.

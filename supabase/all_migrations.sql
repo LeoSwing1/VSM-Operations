@@ -1,6 +1,3 @@
--- VSM Growth Operations — ALL migrations in one file (generated). Paste into Supabase SQL Editor and Run once on an EMPTY project.
-
--- >>> 0001_foundation.sql
 -- =============================================================================
 -- VSM Growth Operations — 0001 Foundation
 -- Organizations, people, RBAC, audit. Every table is org-scoped and RLS-protected.
@@ -399,8 +396,6 @@ end $$;
 revoke all on function bootstrap_organization(text,text,uuid,text,text) from public, anon, authenticated;
 revoke all on function seed_default_permissions(uuid) from public, anon, authenticated;
 revoke all on function _audit(uuid,text,text,text,jsonb) from public, anon, authenticated;
-
--- >>> 0002_workforce.sql
 -- =============================================================================
 -- 0002 Workforce — attendance, corrections, holidays, leave, daily updates,
 -- projects, tasks (with review/quality separated from completion).
@@ -877,8 +872,6 @@ create policy tasks_update on tasks for update to authenticated
 
 create policy task_events_read on task_events for select to authenticated
   using (exists (select 1 from tasks t where t.id = task_id and t.org_id = current_org_id() and can_see_task(t)));
-
--- >>> 0003_performance_payroll.sql
 -- =============================================================================
 -- 0003 Performance & Payroll
 -- Salary data is visible ONLY to the employee themself and to roles holding
@@ -1338,8 +1331,6 @@ create policy pe_delete on payroll_entries for delete to authenticated
 
 -- SUPER_ADMIN gets payroll.approve + payroll.pay implicitly via has_perm(). Give HR the explicit grants
 -- by configuration in /settings/roles if your policy wants HR to approve (default: Super Admin approves).
-
--- >>> 0004_crm_notifications.sql
 -- =============================================================================
 -- 0004 CRM intake, notifications, email outbox (Resend), rate limits
 -- Enquiries are persisted BEFORE any email is attempted.
@@ -1643,8 +1634,6 @@ revoke all on function hit_rate_limit(text,int,int) from public, anon;
 grant execute on function ingest_enquiry(text,jsonb,text) to service_role;
 grant execute on function claim_email_batch(int) to service_role;
 grant execute on function hit_rate_limit(text,int,int) to service_role, authenticated;
-
--- >>> 0005_payroll_adjustments.sql
 -- =============================================================================
 -- 0005 One-off payroll adjustments (bonus / reimbursement / deduction) per run.
 -- =============================================================================
@@ -1686,8 +1675,6 @@ create policy padj_write on payroll_adjustments for insert to authenticated
               and created_by = current_employee_id());
 create policy padj_delete on payroll_adjustments for delete to authenticated
   using (org_id = current_org_id() and has_perm('payroll.manage') and employee_id <> current_employee_id());
-
--- >>> 0006_access_hierarchy.sql
 -- =============================================================================
 -- 0006 Access hierarchy
 --   • Role levels (who outranks whom), editable labels/descriptions per org.
@@ -1960,8 +1947,6 @@ begin
   return new;
 end $$;
 create trigger role_settings_audit_trg after update on role_settings for each row execute function role_settings_audit();
-
--- >>> 0007_notification_prefs_integrations.sql
 -- =============================================================================
 -- 0007 Notification preferences, daily digest, integration status
 --   • Each employee chooses per category how EMAIL reaches them: IMMEDIATE, DIGEST or MUTED.
@@ -2152,3 +2137,2007 @@ create policy ndi_read on notification_digest_items for select to authenticated 
 
 create policy is_read on integration_status for select to authenticated
   using (org_id = current_org_id() and has_perm('settings.manage'));
+-- =============================================================================
+-- 0008 HR lifecycle + recruitment. All records are organization-scoped.
+-- =============================================================================
+create type candidate_stage as enum ('APPLIED','SCREENING','INTERVIEW','OFFER','HIRED','REJECTED','WITHDRAWN');
+create type interview_result as enum ('PENDING','PASS','FAIL','ON_HOLD');
+
+create table candidates (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  full_name text not null check (length(trim(full_name)) between 2 and 120),
+  email text not null check (email ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$'),
+  phone text,
+  role_applied text not null check (length(trim(role_applied)) between 2 and 120),
+  department_id uuid references departments(id) on delete set null,
+  source text not null default 'DIRECT' check (source in ('DIRECT','REFERRAL','JOB_BOARD','LINKEDIN','WEBSITE','OTHER')),
+  stage candidate_stage not null default 'APPLIED',
+  resume_path text,
+  expected_salary_paise bigint check (expected_salary_paise is null or expected_salary_paise >= 0),
+  notice_period_days int check (notice_period_days is null or notice_period_days between 0 and 365),
+  owner_id uuid references employees(id) on delete set null,
+  notes text,
+  rejection_reason text,
+  converted_employee_id uuid references employees(id) on delete set null,
+  created_by uuid references employees(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (org_id, email, role_applied),
+  check ((stage = 'HIRED') = (converted_employee_id is not null) or stage <> 'HIRED')
+);
+create index candidates_org_stage_idx on candidates(org_id, stage, created_at desc);
+create index candidates_owner_idx on candidates(owner_id, stage);
+
+create table candidate_interviews (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  candidate_id uuid not null references candidates(id) on delete cascade,
+  interviewer_id uuid references employees(id) on delete set null,
+  scheduled_at timestamptz not null,
+  interview_type text not null default 'TECHNICAL' check (interview_type in ('SCREENING','TECHNICAL','CULTURE','FINAL','OTHER')),
+  result interview_result not null default 'PENDING',
+  score numeric(5,2) check (score is null or score between 0 and 100),
+  feedback text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index candidate_interviews_candidate_idx on candidate_interviews(candidate_id, scheduled_at desc);
+
+create table employment_events (
+  id bigint generated always as identity primary key,
+  org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  event_type text not null check (event_type in ('JOINED','PROBATION_STARTED','CONFIRMED','PROMOTED','TRANSFERRED','STATUS_CHANGED','RESIGNED','NOTICE_STARTED','EXIT_CLEARED','EXITED','NOTE')),
+  effective_date date not null default current_date,
+  details jsonb not null default '{}',
+  note text,
+  actor_id uuid references employees(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index employment_events_employee_idx on employment_events(employee_id, effective_date desc, id desc);
+
+create table onboarding_checklist_items (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  title text not null check (length(trim(title)) between 2 and 160),
+  category text not null default 'GENERAL' check (category in ('DOCUMENTS','IT_ACCESS','HR_ORIENTATION','TEAM_SETUP','GENERAL')),
+  due_date date,
+  completed_at timestamptz,
+  completed_by uuid references employees(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index onboarding_employee_idx on onboarding_checklist_items(employee_id, completed_at);
+
+-- Record initial join event for future employee inserts. Existing staff are backfilled once.
+insert into employment_events(org_id, employee_id, event_type, effective_date, details)
+select e.org_id, e.id, 'JOINED', e.joining_date, jsonb_build_object('source','migration_backfill')
+from employees e where not exists (
+  select 1 from employment_events ev where ev.employee_id=e.id and ev.event_type='JOINED'
+);
+
+create or replace function employee_lifecycle_event() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if tg_op = 'INSERT' then
+    insert into employment_events(org_id, employee_id, event_type, effective_date, details, actor_id)
+    values (new.org_id, new.id, 'JOINED', new.joining_date,
+      jsonb_build_object('status',new.status,'employment_type',new.employment_type), current_employee_id());
+    if new.status='PROBATION' then
+      insert into employment_events(org_id, employee_id, event_type, effective_date, details, actor_id)
+      values (new.org_id, new.id, 'PROBATION_STARTED', new.joining_date, '{}'::jsonb, current_employee_id());
+    end if;
+  elsif new.status is distinct from old.status then
+    insert into employment_events(org_id, employee_id, event_type, effective_date, details, actor_id)
+    values (new.org_id, new.id,
+      case when old.status='PROBATION' and new.status='ACTIVE' then 'CONFIRMED' when new.status='PROBATION' then 'PROBATION_STARTED' when new.status='NOTICE' then 'NOTICE_STARTED' when new.status='EXITED' then 'EXITED' else 'STATUS_CHANGED' end,
+      coalesce(new.exit_date, current_date), jsonb_build_object('from',old.status,'to',new.status), current_employee_id());
+  elsif new.department_id is distinct from old.department_id or new.designation is distinct from old.designation then
+    insert into employment_events(org_id, employee_id, event_type, effective_date, details, actor_id)
+    values (new.org_id, new.id, case when new.department_id is distinct from old.department_id then 'TRANSFERRED' else 'PROMOTED' end,
+      current_date, jsonb_build_object('department_from',old.department_id,'department_to',new.department_id,'designation_from',old.designation,'designation_to',new.designation), current_employee_id());
+  end if;
+  return new;
+end $$;
+create trigger employee_lifecycle_event_trg after insert or update of status, department_id, designation on employees
+for each row execute function employee_lifecycle_event();
+
+create or replace function candidates_touch_updated_at() returns trigger language plpgsql as $$
+begin new.updated_at := now(); return new; end $$;
+create trigger candidates_touch before update on candidates for each row execute function candidates_touch_updated_at();
+create trigger interviews_touch before update on candidate_interviews for each row execute function candidates_touch_updated_at();
+
+alter table candidates enable row level security;
+alter table candidate_interviews enable row level security;
+alter table employment_events enable row level security;
+alter table onboarding_checklist_items enable row level security;
+
+create policy candidates_read on candidates for select to authenticated
+using (org_id=current_org_id() and (has_perm('recruit.view') or has_perm('recruit.manage')));
+create policy candidates_insert on candidates for insert to authenticated
+with check (org_id=current_org_id() and has_perm('recruit.manage') and created_by=current_employee_id());
+create policy candidates_update on candidates for update to authenticated
+using (org_id=current_org_id() and has_perm('recruit.manage'))
+with check (org_id=current_org_id() and has_perm('recruit.manage'));
+create policy candidates_delete on candidates for delete to authenticated
+using (org_id=current_org_id() and has_perm('recruit.manage'));
+
+create policy interviews_read on candidate_interviews for select to authenticated
+using (org_id=current_org_id() and (has_perm('recruit.view') or has_perm('recruit.manage')));
+create policy interviews_write on candidate_interviews for all to authenticated
+using (org_id=current_org_id() and has_perm('recruit.manage'))
+with check (org_id=current_org_id() and has_perm('recruit.manage'));
+
+create policy employment_events_read on employment_events for select to authenticated
+using (org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('people.manage') or has_perm('people.view_all') or (has_perm('people.view_team') and is_in_my_team(employee_id))));
+-- Events are written only by triggers / trusted service role; no client write policy.
+create policy onboarding_read on onboarding_checklist_items for select to authenticated
+using (org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('people.manage') or (has_perm('people.view_team') and is_in_my_team(employee_id))));
+create policy onboarding_insert on onboarding_checklist_items for insert to authenticated
+with check (org_id=current_org_id() and has_perm('people.manage'));
+create policy onboarding_update on onboarding_checklist_items for update to authenticated
+using (org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('people.manage')))
+with check (org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('people.manage')) and completed_by=current_employee_id());
+create policy onboarding_delete on onboarding_checklist_items for delete to authenticated
+using (org_id=current_org_id() and has_perm('people.manage'));
+
+-- Extend default role permissions for existing and future organizations.
+insert into role_permissions(org_id, role, permission)
+select o.id, r.role, p.permission
+from organizations o
+cross join (values ('ADMIN'::app_role),('HR_MANAGER'::app_role)) r(role)
+cross join (values ('recruit.view'),('recruit.manage')) p(permission)
+on conflict do nothing;
+
+create or replace function seed_recruitment_permissions() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  insert into role_permissions(org_id, role, permission) values
+    (new.id,'ADMIN','recruit.view'),(new.id,'ADMIN','recruit.manage'),
+    (new.id,'HR_MANAGER','recruit.view'),(new.id,'HR_MANAGER','recruit.manage')
+  on conflict do nothing;
+  return new;
+end $$;
+create trigger organizations_seed_recruitment after insert on organizations
+for each row execute function seed_recruitment_permissions();
+
+-- Candidate stage transitions are auditable.
+create or replace function candidate_audit_event() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if tg_op='INSERT' then
+    perform _audit(new.org_id,'recruit.candidate.created','candidate',new.id::text,jsonb_build_object('stage',new.stage));
+  elsif new.stage is distinct from old.stage then
+    perform _audit(new.org_id,'recruit.candidate.stage_changed','candidate',new.id::text,jsonb_build_object('from',old.stage,'to',new.stage));
+  end if;
+  return new;
+end $$;
+create trigger candidate_audit_trg after insert or update on candidates for each row execute function candidate_audit_event();
+
+-- Atomic candidate-to-employee conversion; no partially hired candidate if insert fails.
+create or replace function hire_candidate(
+  p_candidate uuid, p_employee_code text, p_joining_date date,
+  p_employment_type employment_type default 'FULL_TIME'
+) returns uuid language plpgsql security definer set search_path = public, pg_temp as $$
+declare c candidates; v_employee uuid;
+begin
+  if not has_perm('recruit.manage') or not has_perm('people.manage') then
+    raise exception 'recruit.manage and people.manage required' using errcode='42501';
+  end if;
+  select * into c from candidates where id=p_candidate and org_id=current_org_id() for update;
+  if c.id is null then raise exception 'candidate not found' using errcode='P0002'; end if;
+  if c.stage='HIRED' or c.converted_employee_id is not null then raise exception 'candidate already hired' using errcode='P0001'; end if;
+  if c.stage <> 'OFFER' then raise exception 'candidate must reach OFFER stage before hiring' using errcode='P0001'; end if;
+  if p_employee_code is null or upper(trim(p_employee_code)) !~ '^[A-Z0-9-]{2,20}$' then raise exception 'invalid employee ID' using errcode='P0001'; end if;
+  if p_joining_date is null then raise exception 'joining date is required' using errcode='P0001'; end if;
+  insert into employees(org_id,employee_code,full_name,official_email,phone,designation,department_id,role,joining_date,employment_type,status)
+  values(c.org_id,upper(trim(p_employee_code)),c.full_name,lower(c.email),c.phone,c.role_applied,c.department_id,'EMPLOYEE',p_joining_date,p_employment_type,'PROBATION')
+  returning id into v_employee;
+  insert into onboarding_checklist_items(org_id,employee_id,title,category)
+  values
+    (c.org_id,v_employee,'Collect identity and employment documents','DOCUMENTS'),
+    (c.org_id,v_employee,'Create official email and system access','IT_ACCESS'),
+    (c.org_id,v_employee,'Complete HR policies and handbook orientation','HR_ORIENTATION'),
+    (c.org_id,v_employee,'Introduce team, manager and reporting process','TEAM_SETUP'),
+    (c.org_id,v_employee,'Confirm workstation and required tools','IT_ACCESS');
+  update candidates set stage='HIRED',converted_employee_id=v_employee where id=c.id;
+  perform _audit(c.org_id,'recruit.candidate.hired','candidate',c.id::text,jsonb_build_object('employee_id',v_employee,'employee_code',upper(trim(p_employee_code))));
+  return v_employee;
+end $$;
+revoke all on function hire_candidate(uuid,text,date,employment_type) from public, anon;
+grant execute on function hire_candidate(uuid,text,date,employment_type) to authenticated;
+
+
+-- Reject cross-organization foreign-key references even when a caller guesses UUIDs.
+create or replace function guard_recruitment_org_refs() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if tg_table_name='candidates' then
+    if new.department_id is not null and not exists(select 1 from departments d where d.id=new.department_id and d.org_id=new.org_id) then raise exception 'department is outside this organization' using errcode='23514'; end if;
+    if new.owner_id is not null and not exists(select 1 from employees e where e.id=new.owner_id and e.org_id=new.org_id) then raise exception 'recruiter is outside this organization' using errcode='23514'; end if;
+  elsif tg_table_name='candidate_interviews' then
+    if not exists(select 1 from candidates c where c.id=new.candidate_id and c.org_id=new.org_id and c.stage not in ('HIRED','REJECTED','WITHDRAWN')) then raise exception 'candidate is unavailable for interview' using errcode='23514'; end if;
+    if new.interviewer_id is not null and not exists(select 1 from employees e where e.id=new.interviewer_id and e.org_id=new.org_id) then raise exception 'interviewer is outside this organization' using errcode='23514'; end if;
+  elsif tg_table_name='onboarding_checklist_items' then
+    if not exists(select 1 from employees e where e.id=new.employee_id and e.org_id=new.org_id) then raise exception 'employee is outside this organization' using errcode='23514'; end if;
+    if new.completed_by is not null and not exists(select 1 from employees e where e.id=new.completed_by and e.org_id=new.org_id) then raise exception 'completer is outside this organization' using errcode='23514'; end if;
+  end if;
+  return new;
+end $$;
+create trigger candidates_org_guard before insert or update on candidates for each row execute function guard_recruitment_org_refs();
+create trigger interviews_org_guard before insert or update on candidate_interviews for each row execute function guard_recruitment_org_refs();
+create trigger onboarding_org_guard before insert or update on onboarding_checklist_items for each row execute function guard_recruitment_org_refs();
+
+
+-- A converted hire is terminal; only hire_candidate may set HIRED + employee link.
+create or replace function protect_hired_candidate() returns trigger
+language plpgsql as $$
+begin
+  if old.stage='HIRED' or old.converted_employee_id is not null then
+    raise exception 'a hired candidate cannot be changed' using errcode='P0001';
+  end if;
+  if new.stage='HIRED' and new.converted_employee_id is null then
+    raise exception 'use the hire workflow to convert a candidate' using errcode='P0001';
+  end if;
+  return new;
+end $$;
+create trigger candidates_protect_hired before update on candidates
+for each row execute function protect_hired_candidate();
+
+-- Candidate conversion link is writable only inside the SECURITY DEFINER hire RPC.
+-- Restrict authenticated table grants as well as RLS so callers cannot forge a hire.
+revoke insert, update on candidates from authenticated;
+grant insert (org_id,full_name,email,phone,role_applied,department_id,source,stage,resume_path,expected_salary_paise,notice_period_days,owner_id,notes,rejection_reason,created_by)
+  on candidates to authenticated;
+grant update (stage,rejection_reason,owner_id,notes,resume_path,expected_salary_paise,notice_period_days)
+  on candidates to authenticated;
+
+-- Employees may complete checklist status only; HR owns checklist content.
+revoke update on onboarding_checklist_items from authenticated;
+grant update (completed_at,completed_by) on onboarding_checklist_items to authenticated;
+-- =============================================================================
+-- 0009 HR completion: private employee documents, probation reviews, exit clearance
+-- =============================================================================
+create table employee_documents (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  category text not null check (category in ('IDENTITY','EDUCATION','EMPLOYMENT','TAX','BANK','POLICY','OTHER')),
+  title text not null check (length(trim(title)) between 2 and 160),
+  storage_path text not null unique,
+  original_name text not null check (length(original_name) between 1 and 255),
+  mime_type text not null,
+  size_bytes bigint not null check (size_bytes between 1 and 10485760),
+  expires_on date,
+  uploaded_by uuid references employees(id) on delete set null,
+  created_at timestamptz not null default now(),
+  check (storage_path like org_id::text || '/' || employee_id::text || '/%')
+);
+create index employee_documents_employee_idx on employee_documents(org_id, employee_id, created_at desc);
+
+create table probation_reviews (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  reviewer_id uuid references employees(id) on delete set null,
+  due_date date not null,
+  reviewed_on date,
+  status text not null default 'DRAFT' check (status in ('DRAFT','SUBMITTED','APPROVED','CANCELLED')),
+  recommendation text check (recommendation in ('CONFIRM','EXTEND','EXIT')),
+  ratings jsonb not null default '{}' check (jsonb_typeof(ratings)='object'),
+  comments text,
+  next_review_date date,
+  approved_by uuid references employees(id) on delete set null,
+  approved_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (next_review_date is null or next_review_date > due_date),
+  check ((status <> 'APPROVED') or (recommendation is not null and approved_at is not null))
+);
+create index probation_reviews_employee_idx on probation_reviews(org_id, employee_id, due_date desc);
+
+create table exit_clearance_items (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  category text not null check (category in ('MANAGER','IT','FINANCE','HR','ADMIN','OTHER')),
+  title text not null check (length(trim(title)) between 2 and 160),
+  owner_id uuid references employees(id) on delete set null,
+  due_date date,
+  completed_at timestamptz,
+  completed_by uuid references employees(id) on delete set null,
+  notes text,
+  created_at timestamptz not null default now(),
+  check ((completed_at is null) = (completed_by is null))
+);
+create index exit_clearance_employee_idx on exit_clearance_items(org_id, employee_id, completed_at);
+
+create or replace function hr_updated_at() returns trigger language plpgsql as $$
+begin new.updated_at := now(); return new; end $$;
+create trigger probation_reviews_touch before update on probation_reviews for each row execute function hr_updated_at();
+
+-- Private bucket. Never expose employee documents through public URLs.
+insert into storage.buckets(id, name, public, file_size_limit, allowed_mime_types)
+values ('employee-private','employee-private',false,10485760,
+  array['application/pdf','image/jpeg','image/png','image/webp','application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document'])
+on conflict (id) do update set public=false, file_size_limit=10485760,
+  allowed_mime_types=excluded.allowed_mime_types;
+
+alter table employee_documents enable row level security;
+alter table probation_reviews enable row level security;
+alter table exit_clearance_items enable row level security;
+
+create policy employee_documents_read on employee_documents for select to authenticated
+using (org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('people.manage') or (has_perm('people.view_team') and is_in_my_team(employee_id))));
+create policy employee_documents_insert on employee_documents for insert to authenticated
+with check (org_id=current_org_id() and has_perm('people.manage') and uploaded_by=current_employee_id());
+create policy employee_documents_delete on employee_documents for delete to authenticated
+using (org_id=current_org_id() and has_perm('people.manage'));
+
+create policy probation_reviews_read on probation_reviews for select to authenticated
+using (org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('people.manage') or (has_perm('people.view_team') and is_in_my_team(employee_id))));
+create policy probation_reviews_insert on probation_reviews for insert to authenticated
+with check (org_id=current_org_id() and has_perm('people.manage') and reviewer_id=current_employee_id());
+create policy probation_reviews_update on probation_reviews for update to authenticated
+using (org_id=current_org_id() and has_perm('people.manage'))
+with check (org_id=current_org_id() and has_perm('people.manage'));
+create policy probation_reviews_delete on probation_reviews for delete to authenticated
+using (org_id=current_org_id() and has_perm('people.manage') and status='DRAFT');
+
+create policy exit_clearance_read on exit_clearance_items for select to authenticated
+using (org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('people.manage') or (has_perm('people.view_team') and is_in_my_team(employee_id))));
+create policy exit_clearance_insert on exit_clearance_items for insert to authenticated
+with check (org_id=current_org_id() and has_perm('people.manage'));
+create policy exit_clearance_update on exit_clearance_items for update to authenticated
+using (org_id=current_org_id() and has_perm('people.manage'))
+with check (org_id=current_org_id() and has_perm('people.manage'));
+create policy exit_clearance_delete on exit_clearance_items for delete to authenticated
+using (org_id=current_org_id() and has_perm('people.manage') and completed_at is null);
+
+-- Storage paths are org_id/employee_id/document_id-filename. The bucket is private.
+create policy employee_private_read on storage.objects for select to authenticated
+using (bucket_id='employee-private' and (storage.foldername(name))[1]=current_org_id()::text and exists (
+  select 1 from employees e where e.id::text=(storage.foldername(name))[2] and e.org_id=current_org_id()
+  and (e.id=current_employee_id() or has_perm('people.manage') or (has_perm('people.view_team') and is_in_my_team(e.id)))
+));
+create policy employee_private_insert on storage.objects for insert to authenticated
+with check (bucket_id='employee-private' and (storage.foldername(name))[1]=current_org_id()::text and has_perm('people.manage') and exists (
+  select 1 from employees e where e.id::text=(storage.foldername(name))[2] and e.org_id=current_org_id()
+));
+create policy employee_private_delete on storage.objects for delete to authenticated
+using (bucket_id='employee-private' and (storage.foldername(name))[1]=current_org_id()::text and has_perm('people.manage'));
+
+-- Record auditable HR events for probation approvals and exit checklist completion.
+create or replace function audit_hr_record() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+  insert into audit_events(org_id,actor_employee_id,actor_user_id,action,entity,entity_id,metadata)
+  values (coalesce(new.org_id,old.org_id),current_employee_id(),auth.uid(),
+    lower(tg_table_name)||'.'||lower(tg_op),tg_table_name,coalesce(new.id,old.id)::text,
+    jsonb_build_object('employee_id',coalesce(new.employee_id,old.employee_id)));
+  if tg_op='DELETE' then return old; else return new; end if;
+end $$;
+create trigger probation_reviews_audit after insert or update or delete on probation_reviews for each row execute function audit_hr_record();
+create trigger exit_clearance_audit after insert or update or delete on exit_clearance_items for each row execute function audit_hr_record();
+create trigger employee_documents_audit after insert or delete on employee_documents for each row execute function audit_hr_record();
+
+-- Issue controlled employment letters from an immutable employee-data snapshot.
+create table employee_letters (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  letter_type text not null check (letter_type in ('OFFER','APPOINTMENT','EXPERIENCE','RELIEVING')),
+  reference_no text not null,
+  issued_on date not null default current_date,
+  snapshot jsonb not null check (jsonb_typeof(snapshot)='object'),
+  status text not null default 'ISSUED' check (status in ('ISSUED','REVOKED')),
+  issued_by uuid references employees(id) on delete set null,
+  revoked_at timestamptz,
+  revoked_by uuid references employees(id) on delete set null,
+  created_at timestamptz not null default now(),
+  unique(org_id, reference_no),
+  check ((status='REVOKED') = (revoked_at is not null))
+);
+create index employee_letters_employee_idx on employee_letters(org_id, employee_id, issued_on desc);
+alter table employee_letters enable row level security;
+create policy employee_letters_read on employee_letters for select to authenticated
+using (org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('people.manage')));
+create policy employee_letters_insert on employee_letters for insert to authenticated
+with check (org_id=current_org_id() and has_perm('people.manage') and issued_by=current_employee_id() and status='ISSUED');
+create policy employee_letters_update on employee_letters for update to authenticated
+using (org_id=current_org_id() and has_perm('people.manage'))
+with check (org_id=current_org_id() and has_perm('people.manage'));
+create trigger employee_letters_audit after insert or update on employee_letters for each row execute function audit_hr_record();
+
+-- State transitions are RPC-only so callers cannot forge a probation approval
+-- or update the employee status outside the same database transaction.
+create or replace function submit_probation_review(p_review_id uuid, p_comments text default null)
+returns void language plpgsql security definer set search_path=public,pg_temp as $$
+declare r probation_reviews;
+begin
+  if not has_perm('people.manage') then raise exception 'people.manage required' using errcode='42501'; end if;
+  select * into r from probation_reviews where id=p_review_id and org_id=current_org_id() for update;
+  if not found or r.status<>'DRAFT' then raise exception 'review is missing or not in draft' using errcode='P0001'; end if;
+  update probation_reviews set status='SUBMITTED', reviewed_on=current_date, comments=left(p_comments,4000)
+  where id=p_review_id and org_id=current_org_id();
+end $$;
+
+create or replace function decide_probation_review(p_review_id uuid, p_recommendation text, p_comments text default null, p_next_review_date date default null)
+returns void language plpgsql security definer set search_path=public,pg_temp as $$
+declare r probation_reviews; emp_status employment_status;
+begin
+  if not has_perm('people.manage') then raise exception 'people.manage required' using errcode='42501'; end if;
+  if p_recommendation is null or p_recommendation not in ('CONFIRM','EXTEND','EXIT') then raise exception 'invalid recommendation'; end if;
+  select * into r from probation_reviews where id=p_review_id and org_id=current_org_id() for update;
+  if not found or r.status<>'SUBMITTED' then raise exception 'review is missing or not submitted' using errcode='P0001'; end if;
+  select status into emp_status from employees where id=r.employee_id and org_id=current_org_id() for update;
+  if emp_status is distinct from 'PROBATION'::employment_status then raise exception 'employee is not currently on probation' using errcode='P0001'; end if;
+  if p_recommendation='EXTEND' and (p_next_review_date is null or p_next_review_date<=r.due_date) then
+    raise exception 'extension requires a next review date after the current due date';
+  end if;
+  update probation_reviews set status='APPROVED', recommendation=p_recommendation,
+    comments=left(p_comments,4000), reviewed_on=current_date,
+    next_review_date=case when p_recommendation='EXTEND' then p_next_review_date else null end,
+    approved_by=current_employee_id(), approved_at=now()
+  where id=p_review_id and org_id=current_org_id();
+  if p_recommendation='CONFIRM' then
+    update employees set status='ACTIVE' where id=r.employee_id and org_id=current_org_id() and status='PROBATION';
+  elsif p_recommendation='EXIT' then
+    update employees set status='NOTICE' where id=r.employee_id and org_id=current_org_id() and status='PROBATION';
+  end if;
+end $$;
+
+create or replace function revoke_employee_letter(p_letter_id uuid)
+returns void language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+  if not has_perm('people.manage') then raise exception 'people.manage required' using errcode='42501'; end if;
+  update employee_letters set status='REVOKED', revoked_at=now(), revoked_by=current_employee_id()
+  where id=p_letter_id and org_id=current_org_id() and status='ISSUED';
+  if not found then raise exception 'issued letter not found' using errcode='P0001'; end if;
+end $$;
+
+revoke all on function submit_probation_review(uuid,text), decide_probation_review(uuid,text,text,date), revoke_employee_letter(uuid) from public, anon;
+grant execute on function submit_probation_review(uuid,text), decide_probation_review(uuid,text,text,date), revoke_employee_letter(uuid) to authenticated;
+revoke update, delete on probation_reviews from authenticated;
+revoke update on employee_letters from authenticated;
+
+-- Enforce organization boundaries on every employee/reviewer/actor foreign key.
+create or replace function guard_hr_org_refs() returns trigger language plpgsql as $$
+begin
+  if not exists (select 1 from employees e where e.id=new.employee_id and e.org_id=new.org_id) then
+    raise exception 'employee must belong to the same organization' using errcode='23514';
+  end if;
+  if tg_table_name='employee_documents' and new.uploaded_by is not null and not exists (select 1 from employees e where e.id=new.uploaded_by and e.org_id=new.org_id) then
+    raise exception 'uploader must belong to the same organization' using errcode='23514';
+  end if;
+  if tg_table_name='probation_reviews' then
+    if new.reviewer_id is not null and not exists (select 1 from employees e where e.id=new.reviewer_id and e.org_id=new.org_id) then raise exception 'reviewer must belong to the same organization' using errcode='23514'; end if;
+    if new.approved_by is not null and not exists (select 1 from employees e where e.id=new.approved_by and e.org_id=new.org_id) then raise exception 'approver must belong to the same organization' using errcode='23514'; end if;
+  end if;
+  if tg_table_name='exit_clearance_items' then
+    if new.owner_id is not null and not exists (select 1 from employees e where e.id=new.owner_id and e.org_id=new.org_id) then raise exception 'clearance owner must belong to the same organization' using errcode='23514'; end if;
+    if new.completed_by is not null and not exists (select 1 from employees e where e.id=new.completed_by and e.org_id=new.org_id) then raise exception 'clearance actor must belong to the same organization' using errcode='23514'; end if;
+  end if;
+  if tg_table_name='employee_letters' then
+    if new.issued_by is not null and not exists (select 1 from employees e where e.id=new.issued_by and e.org_id=new.org_id) then raise exception 'issuer must belong to the same organization' using errcode='23514'; end if;
+    if new.revoked_by is not null and not exists (select 1 from employees e where e.id=new.revoked_by and e.org_id=new.org_id) then raise exception 'revoker must belong to the same organization' using errcode='23514'; end if;
+  end if;
+  return new;
+end $$;
+create trigger employee_documents_org_guard before insert or update on employee_documents for each row execute function guard_hr_org_refs();
+create trigger probation_reviews_org_guard before insert or update on probation_reviews for each row execute function guard_hr_org_refs();
+create trigger exit_clearance_org_guard before insert or update on exit_clearance_items for each row execute function guard_hr_org_refs();
+create trigger employee_letters_org_guard before insert or update on employee_letters for each row execute function guard_hr_org_refs();
+-- Block 04: Finance ERP. All monetary values are stored as numeric(14,2) in org currency.
+create table vendors (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  name text not null check (length(trim(name)) between 2 and 160), contact_name text, email text, phone text,
+  tax_id text, address text, payment_terms text, bank_details jsonb not null default '{}',
+  status text not null default 'ACTIVE' check (status in ('ACTIVE','ON_HOLD','ARCHIVED')),
+  notes text, created_by uuid references employees(id), created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique(org_id,name), unique(org_id,tax_id)
+);
+create index vendors_org_status_idx on vendors(org_id,status);
+
+create table finance_expenses (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  expense_code text not null, expense_type text not null check (expense_type in ('COMPANY_EXPENSE','REIMBURSEMENT')),
+  employee_id uuid not null references employees(id), vendor_id uuid references vendors(id), project_id uuid references projects(id), department_id uuid references departments(id),
+  category text not null check (length(trim(category)) between 2 and 80), description text not null check (length(trim(description)) between 3 and 1000),
+  amount numeric(14,2) not null check (amount > 0), currency text not null default 'INR', expense_date date not null,
+  receipt_path text, receipt_name text, receipt_mime text, receipt_size bigint check (receipt_size is null or receipt_size between 1 and 10485760),
+  status text not null default 'DRAFT' check (status in ('DRAFT','SUBMITTED','MANAGER_APPROVED','APPROVED','REJECTED','PAID','CANCELLED')),
+  manager_id uuid references employees(id), manager_decision_at timestamptz, manager_note text,
+  finance_decided_by uuid references employees(id), finance_decision_at timestamptz, finance_note text,
+  paid_by uuid references employees(id), paid_at timestamptz, payment_reference text, payment_method text, paid_on date,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique(org_id,expense_code), check ((status <> 'PAID') or (paid_at is not null and paid_by is not null and paid_on is not null and payment_reference is not null and payment_method is not null))
+);
+create index finance_expenses_org_date_idx on finance_expenses(org_id,expense_date desc);
+create index finance_expenses_employee_idx on finance_expenses(employee_id,created_at desc);
+create index finance_expenses_status_idx on finance_expenses(org_id,status);
+
+create table client_invoices (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  invoice_number text not null, client_id uuid not null references clients(id), project_id uuid references projects(id),
+  issue_date date not null, due_date date not null, currency text not null default 'INR',
+  subtotal numeric(14,2) not null check (subtotal >= 0), tax_amount numeric(14,2) not null default 0 check (tax_amount >= 0),
+  total_amount numeric(14,2) generated always as (subtotal + tax_amount) stored,
+  status text not null default 'DRAFT' check (status in ('DRAFT','ISSUED','PARTIALLY_PAID','PAID','VOID','OVERDUE')),
+  notes text, terms text, issued_by uuid references employees(id), created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique(org_id,invoice_number), check(due_date >= issue_date)
+);
+create table invoice_lines (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  invoice_id uuid not null references client_invoices(id) on delete cascade, description text not null,
+  quantity numeric(12,3) not null check(quantity > 0), unit_price numeric(14,2) not null check(unit_price >= 0),
+  line_total numeric(14,2) generated always as (round(quantity * unit_price,2)) stored
+);
+create index invoices_org_dates_idx on client_invoices(org_id,issue_date desc);
+
+create table invoice_payments (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  invoice_id uuid not null references client_invoices(id), amount numeric(14,2) not null check(amount > 0),
+  paid_on date not null, method text not null check(method in ('BANK_TRANSFER','UPI','CASH','CARD','CHEQUE','OTHER')),
+  reference text not null, notes text, recorded_by uuid not null references employees(id), created_at timestamptz not null default now(),
+  unique(org_id,reference)
+);
+create index invoice_payments_invoice_idx on invoice_payments(invoice_id,paid_on);
+
+create table vendor_payments (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  vendor_id uuid not null references vendors(id), expense_id uuid references finance_expenses(id), amount numeric(14,2) not null check(amount > 0),
+  paid_on date not null, method text not null check(method in ('BANK_TRANSFER','UPI','CASH','CARD','CHEQUE','OTHER')),
+  reference text not null, notes text, recorded_by uuid not null references employees(id), created_at timestamptz not null default now(), unique(org_id,reference)
+);
+
+create table department_budgets (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  department_id uuid references departments(id), project_id uuid references projects(id), period_start date not null, period_end date not null,
+  category text not null default 'GENERAL', amount numeric(14,2) not null check(amount >= 0), currency text not null default 'INR',
+  created_by uuid not null references employees(id), created_at timestamptz not null default now(),
+  check(period_end >= period_start), check(department_id is not null or project_id is not null),
+  unique(org_id,department_id,project_id,period_start,category)
+);
+create index finance_budgets_period_idx on department_budgets(org_id,period_start,period_end);
+
+create table bank_reconciliations (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  statement_date date not null, bank_account_label text not null, opening_balance numeric(14,2) not null default 0,
+  closing_balance numeric(14,2) not null, status text not null default 'OPEN' check(status in ('OPEN','IN_REVIEW','RECONCILED','CLOSED')),
+  notes text, created_by uuid not null references employees(id), reconciled_by uuid references employees(id), reconciled_at timestamptz, created_at timestamptz not null default now()
+);
+create table bank_statement_lines (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  reconciliation_id uuid not null references bank_reconciliations(id) on delete cascade, transaction_date date not null,
+  description text not null, reference text, debit numeric(14,2) not null default 0 check(debit >= 0), credit numeric(14,2) not null default 0 check(credit >= 0),
+  matched_type text check(matched_type in ('EXPENSE','VENDOR_PAYMENT','INVOICE_PAYMENT')), matched_id uuid, matched_at timestamptz, matched_by uuid references employees(id),
+  check ((debit > 0 and credit = 0) or (credit > 0 and debit = 0))
+);
+create index bank_lines_recon_idx on bank_statement_lines(reconciliation_id,transaction_date);
+
+-- Cross-tenant and relation guard. FK ids alone are not sufficient to establish tenant ownership.
+create or replace function finance_org_guard() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+  if tg_table_name = 'vendors' then
+    if new.created_by is not null and not exists(select 1 from employees where id=new.created_by and org_id=new.org_id) then raise exception 'cross-organisation vendor creator' using errcode='23514'; end if;
+  elsif tg_table_name = 'finance_expenses' then
+    if not exists(select 1 from employees where id=new.employee_id and org_id=new.org_id) then raise exception 'expense employee must belong to organisation' using errcode='23514'; end if;
+    if new.vendor_id is not null and not exists(select 1 from vendors where id=new.vendor_id and org_id=new.org_id) then raise exception 'vendor organisation mismatch' using errcode='23514'; end if;
+    if new.project_id is not null and not exists(select 1 from projects where id=new.project_id and org_id=new.org_id) then raise exception 'project organisation mismatch' using errcode='23514'; end if;
+    if new.department_id is not null and not exists(select 1 from departments where id=new.department_id and org_id=new.org_id) then raise exception 'department organisation mismatch' using errcode='23514'; end if;
+    if new.manager_id is not null and not exists(select 1 from employees where id=new.manager_id and org_id=new.org_id) then raise exception 'manager organisation mismatch' using errcode='23514'; end if;
+    if new.finance_decided_by is not null and not exists(select 1 from employees where id=new.finance_decided_by and org_id=new.org_id) then raise exception 'finance approver organisation mismatch' using errcode='23514'; end if;
+    if new.paid_by is not null and not exists(select 1 from employees where id=new.paid_by and org_id=new.org_id) then raise exception 'payer organisation mismatch' using errcode='23514'; end if;
+    if new.receipt_path is not null and (new.receipt_path not like new.org_id::text||'/'||new.employee_id::text||'/%' or not exists(select 1 from storage.objects where bucket_id='finance-receipts' and name=new.receipt_path)) then raise exception 'receipt path must be a private object uploaded for this employee' using errcode='23514'; end if;
+    if (new.receipt_path is null and (new.receipt_name is not null or new.receipt_mime is not null or new.receipt_size is not null)) or (new.receipt_path is not null and (new.receipt_name is null or new.receipt_mime is null or new.receipt_size is null)) then raise exception 'receipt metadata is incomplete' using errcode='23514'; end if;
+    if new.receipt_mime is not null and new.receipt_mime not in ('application/pdf','image/jpeg','image/png','image/webp') then raise exception 'unsupported receipt type' using errcode='23514'; end if;
+  elsif tg_table_name = 'client_invoices' then
+    if not exists(select 1 from clients where id=new.client_id and org_id=new.org_id) then raise exception 'client organisation mismatch' using errcode='23514'; end if;
+    if new.project_id is not null and not exists(select 1 from projects where id=new.project_id and org_id=new.org_id) then raise exception 'project organisation mismatch' using errcode='23514'; end if;
+    if new.issued_by is not null and not exists(select 1 from employees where id=new.issued_by and org_id=new.org_id) then raise exception 'issuer organisation mismatch' using errcode='23514'; end if;
+  elsif tg_table_name = 'invoice_lines' then
+    if not exists(select 1 from client_invoices where id=new.invoice_id and org_id=new.org_id) then raise exception 'invoice organisation mismatch' using errcode='23514'; end if;
+  elsif tg_table_name = 'invoice_payments' then
+    if not exists(select 1 from client_invoices where id=new.invoice_id and org_id=new.org_id) then raise exception 'invoice organisation mismatch' using errcode='23514'; end if;
+  elsif tg_table_name = 'vendor_payments' then
+    if not exists(select 1 from vendors where id=new.vendor_id and org_id=new.org_id) then raise exception 'vendor organisation mismatch' using errcode='23514'; end if;
+    if new.expense_id is not null and not exists(select 1 from finance_expenses where id=new.expense_id and org_id=new.org_id) then raise exception 'expense organisation mismatch' using errcode='23514'; end if;
+  elsif tg_table_name = 'department_budgets' then
+    if new.department_id is not null and not exists(select 1 from departments where id=new.department_id and org_id=new.org_id) then raise exception 'department organisation mismatch' using errcode='23514'; end if;
+    if new.project_id is not null and not exists(select 1 from projects where id=new.project_id and org_id=new.org_id) then raise exception 'project organisation mismatch' using errcode='23514'; end if;
+    if not exists(select 1 from employees where id=new.created_by and org_id=new.org_id) then raise exception 'budget creator organisation mismatch' using errcode='23514'; end if;
+  elsif tg_table_name = 'bank_statement_lines' then
+    if not exists(select 1 from bank_reconciliations where id=new.reconciliation_id and org_id=new.org_id and status='OPEN') then raise exception 'statement lines can only be added to an open reconciliation' using errcode='23514'; end if;
+  end if;
+  return new;
+end $$;
+create trigger vendors_org_guard before insert or update on vendors for each row execute function finance_org_guard();
+create trigger finance_expenses_org_guard before insert or update on finance_expenses for each row execute function finance_org_guard();
+create trigger client_invoices_org_guard before insert or update on client_invoices for each row execute function finance_org_guard();
+create trigger invoice_lines_org_guard before insert or update on invoice_lines for each row execute function finance_org_guard();
+create trigger invoice_payments_org_guard before insert or update on invoice_payments for each row execute function finance_org_guard();
+create trigger vendor_payments_org_guard before insert or update on vendor_payments for each row execute function finance_org_guard();
+create trigger department_budgets_org_guard before insert or update on department_budgets for each row execute function finance_org_guard();
+create trigger bank_statement_lines_org_guard before insert or update on bank_statement_lines for each row execute function finance_org_guard();
+
+-- RPCs enforce a two-step approval chain and immutable payment evidence.
+create or replace function finance_expense_decide(p_expense uuid,p_decision text,p_note text default null)
+returns void language plpgsql security definer set search_path=public,pg_temp as $$
+declare e finance_expenses;
+begin
+ select * into e from finance_expenses where id=p_expense and org_id=current_org_id() for update;
+ if e.id is null then raise exception 'expense not found'; end if;
+ if p_decision not in ('APPROVE','REJECT') then raise exception 'invalid decision'; end if;
+ if e.status not in ('SUBMITTED','MANAGER_APPROVED') then raise exception 'expense is not awaiting this decision'; end if;
+ if e.status='SUBMITTED' then
+   if e.employee_id=current_employee_id() or not (has_perm('finance.approve_manager') and (has_perm('finance.approve_all') or is_in_my_team(e.employee_id))) then raise exception 'manager approval permission required' using errcode='42501'; end if;
+   if p_decision='REJECT' then update finance_expenses set status='REJECTED',manager_id=current_employee_id(),manager_decision_at=now(),manager_note=p_note,updated_at=now() where id=e.id;
+   else update finance_expenses set status='MANAGER_APPROVED',manager_id=current_employee_id(),manager_decision_at=now(),manager_note=p_note,updated_at=now() where id=e.id; end if;
+ else
+   if e.employee_id=current_employee_id() or not has_perm('finance.approve') then raise exception 'finance approval permission required' using errcode='42501'; end if;
+   if e.manager_id=current_employee_id() then raise exception 'manager and finance approval must be different people' using errcode='42501'; end if;
+   if p_decision='REJECT' then update finance_expenses set status='REJECTED',finance_decided_by=current_employee_id(),finance_decision_at=now(),finance_note=p_note,updated_at=now() where id=e.id;
+   else update finance_expenses set status='APPROVED',finance_decided_by=current_employee_id(),finance_decision_at=now(),finance_note=p_note,updated_at=now() where id=e.id; end if;
+ end if;
+ perform log_audit('finance.expense_'||lower(p_decision),'finance_expense',e.id::text,jsonb_build_object('stage',e.status,'amount',e.amount,'note',p_note));
+end $$;
+revoke all on function finance_expense_decide(uuid,text,text) from public,anon;
+grant execute on function finance_expense_decide(uuid,text,text) to authenticated;
+
+create or replace function finance_mark_expense_paid(p_expense uuid,p_reference text,p_method text,p_paid_on date)
+returns void language plpgsql security definer set search_path=public,pg_temp as $$
+declare e finance_expenses;
+begin
+ if not has_perm('finance.pay') then raise exception 'finance.pay required' using errcode='42501'; end if;
+ select * into e from finance_expenses where id=p_expense and org_id=current_org_id() for update;
+ if e.id is null or e.status <> 'APPROVED' then raise exception 'only approved expenses can be paid'; end if;
+ if p_paid_on is null or length(trim(p_reference))<3 or p_method not in ('BANK_TRANSFER','UPI','CASH','CARD','CHEQUE','OTHER') then raise exception 'valid payment reference and method required'; end if;
+ update finance_expenses set status='PAID',payment_reference=trim(p_reference),payment_method=p_method,paid_on=p_paid_on,paid_by=current_employee_id(),paid_at=now(),updated_at=now() where id=e.id;
+ perform log_audit('finance.expense_paid','finance_expense',e.id::text,jsonb_build_object('amount',e.amount,'reference',p_reference));
+end $$;
+revoke all on function finance_mark_expense_paid(uuid,text,text,date) from public,anon;
+grant execute on function finance_mark_expense_paid(uuid,text,text,date) to authenticated;
+
+create or replace function finance_record_invoice_payment(p_invoice uuid,p_amount numeric,p_paid_on date,p_method text,p_reference text,p_notes text default null)
+returns uuid language plpgsql security definer set search_path=public,pg_temp as $$
+declare i client_invoices; paid numeric(14,2); new_id uuid;
+begin
+ if not (has_perm('finance.manage') or has_perm('finance.pay')) then raise exception 'finance.manage required' using errcode='42501'; end if;
+ select * into i from client_invoices where id=p_invoice and org_id=current_org_id() for update;
+ if i.id is null or i.status not in ('ISSUED','PARTIALLY_PAID','OVERDUE') then raise exception 'invoice is not receivable'; end if;
+ select coalesce(sum(amount),0) into paid from invoice_payments where invoice_id=i.id;
+ if p_amount<=0 or p_amount > i.total_amount-paid then raise exception 'payment exceeds outstanding invoice balance'; end if;
+ if p_method not in ('BANK_TRANSFER','UPI','CASH','CARD','CHEQUE','OTHER') or length(trim(p_reference))<3 then raise exception 'payment method and reference required'; end if;
+ insert into invoice_payments(org_id,invoice_id,amount,paid_on,method,reference,notes,recorded_by) values(i.org_id,i.id,p_amount,p_paid_on,p_method,trim(p_reference),p_notes,current_employee_id()) returning id into new_id;
+ select coalesce(sum(amount),0) into paid from invoice_payments where invoice_id=i.id;
+ update client_invoices set status=case when paid>=i.total_amount then 'PAID' else 'PARTIALLY_PAID' end,updated_at=now() where id=i.id;
+ perform log_audit('finance.invoice_payment_recorded','client_invoice',i.id::text,jsonb_build_object('payment_id',new_id,'amount',p_amount,'reference',p_reference));
+ return new_id;
+end $$;
+revoke all on function finance_record_invoice_payment(uuid,numeric,date,text,text,text) from public,anon;
+grant execute on function finance_record_invoice_payment(uuid,numeric,date,text,text,text) to authenticated;
+
+-- Tenant-scoped RLS. Employee self-service is restricted to own submitted expenses.
+alter table vendors enable row level security;
+create policy vendors_finance_read on vendors for select to authenticated using(org_id=current_org_id() and (has_perm('finance.view') or has_perm('finance.manage') or has_perm('finance.pay')));
+create policy vendors_finance_write on vendors for all to authenticated using(org_id=current_org_id() and has_perm('finance.manage')) with check(org_id=current_org_id() and has_perm('finance.manage'));
+alter table finance_expenses enable row level security;
+create policy finance_expenses_read on finance_expenses for select to authenticated using(org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('finance.view') or has_perm('finance.manage') or has_perm('finance.approve') or has_perm('finance.pay') or has_perm('finance.export') or has_perm('finance.approve_all') or (has_perm('finance.approve_manager') and is_in_my_team(employee_id))));
+create policy finance_expenses_insert on finance_expenses for insert to authenticated with check(org_id=current_org_id() and employee_id=current_employee_id() and status in ('DRAFT','SUBMITTED') and manager_id is null and manager_decision_at is null and finance_decided_by is null and finance_decision_at is null and paid_by is null and paid_at is null and paid_on is null and payment_reference is null and payment_method is null and manager_note is null and finance_note is null  );
+revoke delete on finance_expenses from authenticated;
+
+alter table client_invoices enable row level security;
+create policy invoices_read on client_invoices for select to authenticated using(org_id=current_org_id() and (has_perm('finance.view') or has_perm('finance.manage') or has_perm('finance.pay')));
+alter table invoice_lines enable row level security;
+create policy invoice_lines_read on invoice_lines for select to authenticated using(org_id=current_org_id() and (has_perm('finance.view') or has_perm('finance.manage') or has_perm('finance.pay')));
+alter table invoice_payments enable row level security;
+create policy invoice_payments_read on invoice_payments for select to authenticated using(org_id=current_org_id() and (has_perm('finance.view') or has_perm('finance.manage') or has_perm('finance.pay') or has_perm('finance.export')));
+create policy invoice_payments_insert on invoice_payments for insert to authenticated with check(false); -- all payments use transaction-safe RPC
+alter table vendor_payments enable row level security;
+create policy vendor_payments_read on vendor_payments for select to authenticated using(org_id=current_org_id() and (has_perm('finance.view') or has_perm('finance.manage') or has_perm('finance.pay') or has_perm('finance.export')));
+create policy vendor_payments_insert on vendor_payments for insert to authenticated with check(org_id=current_org_id() and has_perm('finance.pay') and recorded_by=current_employee_id());
+alter table department_budgets enable row level security;
+create policy budgets_read on department_budgets for select to authenticated using(org_id=current_org_id() and (has_perm('finance.view') or has_perm('finance.manage')));
+create policy budgets_write on department_budgets for all to authenticated using(org_id=current_org_id() and has_perm('finance.manage')) with check(org_id=current_org_id() and has_perm('finance.manage'));
+alter table bank_reconciliations enable row level security;
+create policy reconciliation_read on bank_reconciliations for select to authenticated using(org_id=current_org_id() and (has_perm('finance.view') or has_perm('finance.manage')));
+create policy reconciliation_insert on bank_reconciliations for insert to authenticated with check(org_id=current_org_id() and has_perm('finance.manage') and status='OPEN' and created_by=current_employee_id() and reconciled_by is null and reconciled_at is null);
+alter table bank_statement_lines enable row level security;
+create policy statement_lines_read on bank_statement_lines for select to authenticated using(org_id=current_org_id() and (has_perm('finance.view') or has_perm('finance.manage')));
+create policy statement_lines_insert on bank_statement_lines for insert to authenticated with check(org_id=current_org_id() and has_perm('finance.manage') and matched_type is null and matched_id is null and matched_at is null and matched_by is null);
+
+-- Private receipt bucket; the expense row is the authoritative access check.
+insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types)
+values('finance-receipts','finance-receipts',false,10485760,array['application/pdf','image/jpeg','image/png','image/webp'])
+on conflict(id) do update set public=false,file_size_limit=10485760,allowed_mime_types=excluded.allowed_mime_types;
+create policy finance_receipts_read on storage.objects for select to authenticated using(bucket_id='finance-receipts' and exists(
+ select 1 from finance_expenses e where e.receipt_path=name and e.org_id=current_org_id() and
+ (e.employee_id=current_employee_id() or has_perm('finance.view') or has_perm('finance.manage') or has_perm('finance.approve') or has_perm('finance.pay') or has_perm('finance.export') or has_perm('finance.approve_all') or (has_perm('finance.approve_manager') and is_in_my_team(e.employee_id)))
+));
+create policy finance_receipts_insert on storage.objects for insert to authenticated with check(bucket_id='finance-receipts' and (storage.foldername(name))[1]=current_org_id()::text and (storage.foldername(name))[2]=current_employee_id()::text and lower(storage.extension(name)) in ('pdf','jpg','jpeg','png','webp'));
+create policy finance_receipts_delete on storage.objects for delete to authenticated using(bucket_id='finance-receipts' and (storage.foldername(name))[1]=current_org_id()::text and (storage.foldername(name))[2]=current_employee_id()::text and not exists(select 1 from finance_expenses e where e.receipt_path=name and e.org_id=current_org_id()));
+
+-- Audit all finance master/ledger mutations, excluding receipt bytes.
+create or replace function finance_audit_trigger() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+ if tg_op='DELETE' then
+   perform _audit(old.org_id,'finance.'||lower(tg_op),tg_table_name,old.id::text,jsonb_build_object('status',old.status));
+   return old;
+ else
+   perform _audit(new.org_id,'finance.'||lower(tg_op),tg_table_name,new.id::text,jsonb_build_object('status',new.status));
+   return new;
+ end if;
+end $$;
+create trigger finance_expenses_audit after insert or update or delete on finance_expenses for each row execute function finance_audit_trigger();
+create trigger finance_invoices_audit after insert or update or delete on client_invoices for each row execute function finance_audit_trigger();
+create trigger finance_vendors_audit after insert or update or delete on vendors for each row execute function finance_audit_trigger();
+
+-- Read-only report views, scoped by the underlying RLS-protected tables.
+create view finance_monthly_summary with (security_invoker=true) as
+select org_id,date_trunc('month',expense_date)::date month,
+ sum(amount) filter(where status in ('APPROVED','PAID')) as approved_expenditure,
+ sum(amount) filter(where status='PAID') as paid_expenditure,
+ count(*) filter(where status in ('SUBMITTED','MANAGER_APPROVED')) as pending_approvals
+from finance_expenses group by org_id,date_trunc('month',expense_date)::date;
+create view finance_invoice_balances with (security_invoker=true) as
+select i.id,i.org_id,i.invoice_number,i.client_id,i.issue_date,i.due_date,i.currency,i.total_amount,
+ case when i.status in ('ISSUED','PARTIALLY_PAID') and i.due_date<current_date then 'OVERDUE' else i.status end as status,
+ coalesce(sum(p.amount),0)::numeric(14,2) paid_amount,(i.total_amount-coalesce(sum(p.amount),0))::numeric(14,2) outstanding_amount
+from client_invoices i left join invoice_payments p on p.invoice_id=i.id group by i.id;
+
+-- Cross-tenant validation for reconciliation headers and payment actors.
+create or replace function finance_org_guard_more() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+ if tg_table_name='bank_reconciliations' then
+   if not exists(select 1 from employees where id=new.created_by and org_id=new.org_id) then raise exception 'creator organisation mismatch' using errcode='23514'; end if;
+   if new.reconciled_by is not null and not exists(select 1 from employees where id=new.reconciled_by and org_id=new.org_id) then raise exception 'reconciler organisation mismatch' using errcode='23514'; end if;
+ elsif tg_table_name='invoice_payments' then
+   if not exists(select 1 from employees where id=new.recorded_by and org_id=new.org_id) then raise exception 'recorder organisation mismatch' using errcode='23514'; end if;
+ elsif tg_table_name='vendor_payments' then
+   if not exists(select 1 from employees where id=new.recorded_by and org_id=new.org_id) then raise exception 'recorder organisation mismatch' using errcode='23514'; end if;
+ end if;
+ return new;
+end $$;
+create trigger bank_reconciliations_org_guard before insert or update on bank_reconciliations for each row execute function finance_org_guard_more();
+create trigger invoice_payments_org_guard_more before insert or update on invoice_payments for each row execute function finance_org_guard_more();
+create trigger vendor_payments_org_guard_more before insert or update on vendor_payments for each row execute function finance_org_guard_more();
+
+-- Default company administrators receive the finance operations set; additional
+-- Finance/Accounts users should be granted the exact permissions by Super Admin.
+insert into role_permissions(org_id,role,permission)
+select o.id,'ADMIN'::app_role,p.permission from organizations o
+cross join (values ('finance.view'),('finance.manage'),('finance.approve_manager'),('finance.approve_all'),('finance.approve'),('finance.pay'),('finance.export')) as p(permission)
+on conflict do nothing;
+
+-- Restrict sensitive state changes to transaction-safe RPCs; RLS alone cannot
+-- constrain which columns a caller updates.
+revoke update on finance_expenses from authenticated;
+revoke update, delete on client_invoices from authenticated;
+revoke update on invoice_payments from authenticated;
+revoke update on vendor_payments from authenticated;
+revoke update on bank_statement_lines from authenticated;
+revoke update on bank_reconciliations from authenticated;
+
+create or replace function finance_create_invoice(
+ p_client_id uuid,p_project_id uuid,p_invoice_number text,p_issue_date date,p_due_date date,
+ p_description text,p_quantity numeric,p_unit_price numeric,p_tax_amount numeric,p_notes text default null
+) returns uuid language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_id uuid; v_org uuid:=current_org_id(); v_subtotal numeric(14,2);
+begin
+ if not has_perm('finance.manage') then raise exception 'finance.manage required' using errcode='42501'; end if;
+ if v_org is null or not exists(select 1 from clients where id=p_client_id and org_id=v_org) then raise exception 'client not found in this organisation'; end if;
+ if p_project_id is not null and not exists(select 1 from projects where id=p_project_id and org_id=v_org) then raise exception 'project not found in this organisation'; end if;
+ if p_due_date<p_issue_date or length(trim(p_invoice_number))<2 or length(trim(p_description))<2 or p_quantity<=0 or p_unit_price<0 or p_tax_amount<0 then raise exception 'invalid invoice details'; end if;
+ v_subtotal:=round(p_quantity*p_unit_price,2);
+ insert into client_invoices(org_id,invoice_number,client_id,project_id,issue_date,due_date,subtotal,tax_amount,status,notes,issued_by)
+ values(v_org,trim(p_invoice_number),p_client_id,p_project_id,p_issue_date,p_due_date,v_subtotal,p_tax_amount,'DRAFT',p_notes,current_employee_id()) returning id into v_id;
+ insert into invoice_lines(org_id,invoice_id,description,quantity,unit_price) values(v_org,v_id,trim(p_description),p_quantity,p_unit_price);
+ perform log_audit('finance.invoice_draft_created','client_invoice',v_id::text,jsonb_build_object('invoice_number',p_invoice_number,'total',v_subtotal+p_tax_amount));
+ return v_id;
+end $$;
+revoke all on function finance_create_invoice(uuid,uuid,text,date,date,text,numeric,numeric,numeric,text) from public,anon;
+grant execute on function finance_create_invoice(uuid,uuid,text,date,date,text,numeric,numeric,numeric,text) to authenticated;
+revoke insert,update,delete on client_invoices from authenticated;
+revoke insert,update,delete on invoice_lines from authenticated;
+
+create or replace function finance_issue_invoice(p_invoice uuid)
+returns void language plpgsql security definer set search_path=public,pg_temp as $$
+declare i client_invoices; n int; line_sum numeric(14,2);
+begin
+ if not has_perm('finance.manage') then raise exception 'finance.manage required' using errcode='42501'; end if;
+ select * into i from client_invoices where id=p_invoice and org_id=current_org_id() for update;
+ if i.id is null or i.status<>'DRAFT' then raise exception 'only draft invoices can be issued'; end if;
+ select count(*),coalesce(sum(line_total),0) into n,line_sum from invoice_lines where invoice_id=i.id and org_id=i.org_id;
+ if n=0 or i.total_amount<=0 or round(line_sum,2)<>round(i.subtotal,2) then raise exception 'invoice lines must exist and equal the invoice subtotal'; end if;
+ update client_invoices set status='ISSUED',updated_at=now() where id=i.id;
+ perform log_audit('finance.invoice_issued','client_invoice',i.id::text,jsonb_build_object('total',i.total_amount));
+end $$;
+revoke all on function finance_issue_invoice(uuid) from public,anon;
+grant execute on function finance_issue_invoice(uuid) to authenticated;
+
+create or replace function finance_match_statement_line(p_line uuid,p_type text,p_id uuid)
+returns void language plpgsql security definer set search_path=public,pg_temp as $$
+declare l bank_statement_lines; amount numeric(14,2); expected_side text;
+begin
+ if not has_perm('finance.manage') then raise exception 'finance.manage required' using errcode='42501'; end if;
+ select * into l from bank_statement_lines where id=p_line and org_id=current_org_id() for update;
+ if l.id is null or l.matched_id is not null or not exists(select 1 from bank_reconciliations r where r.id=l.reconciliation_id and r.org_id=l.org_id and r.status='OPEN') then raise exception 'statement line missing, closed or already matched'; end if;
+ if p_type='EXPENSE' then
+   select e.amount into amount from finance_expenses e where e.id=p_id and e.org_id=l.org_id and e.status='PAID'; expected_side:='DEBIT';
+ elsif p_type='VENDOR_PAYMENT' then
+   select p.amount into amount from vendor_payments p where p.id=p_id and p.org_id=l.org_id; expected_side:='DEBIT';
+ elsif p_type='INVOICE_PAYMENT' then
+   select p.amount into amount from invoice_payments p where p.id=p_id and p.org_id=l.org_id; expected_side:='CREDIT';
+ else raise exception 'invalid match type'; end if;
+ if amount is null then raise exception 'matching ledger transaction not found'; end if;
+ if round(amount,2)<>round(case when expected_side='DEBIT' then l.debit else l.credit end,2) then raise exception 'statement amount or debit/credit direction does not match'; end if;
+ update bank_statement_lines set matched_type=p_type,matched_id=p_id,matched_at=now(),matched_by=current_employee_id() where id=l.id;
+ perform log_audit('finance.statement_line_matched','bank_statement_line',l.id::text,jsonb_build_object('matched_type',p_type,'matched_id',p_id));
+end $$;
+revoke all on function finance_match_statement_line(uuid,text,uuid) from public,anon;
+grant execute on function finance_match_statement_line(uuid,text,uuid) to authenticated;
+
+create or replace function finance_close_reconciliation(p_reconciliation uuid)
+returns void language plpgsql security definer set search_path=public,pg_temp as $$
+declare r bank_reconciliations; line_count int; matched_count int; movement numeric(14,2);
+begin
+ if not has_perm('finance.manage') then raise exception 'finance.manage required' using errcode='42501'; end if;
+ select * into r from bank_reconciliations where id=p_reconciliation and org_id=current_org_id() for update;
+ if r.id is null or r.status not in ('OPEN','IN_REVIEW') then raise exception 'reconciliation is not open'; end if;
+ select count(*),count(*) filter(where matched_id is not null),coalesce(sum(credit-debit),0) into line_count,matched_count,movement from bank_statement_lines where reconciliation_id=r.id and org_id=r.org_id;
+ if line_count=0 or line_count<>matched_count then raise exception 'all statement lines must be matched before closing'; end if;
+ if round(r.opening_balance+movement,2)<>round(r.closing_balance,2) then raise exception 'statement movement does not reconcile to closing balance'; end if;
+ update bank_reconciliations set status='RECONCILED',reconciled_by=current_employee_id(),reconciled_at=now() where id=r.id;
+ perform log_audit('finance.reconciliation_closed','bank_reconciliation',r.id::text,jsonb_build_object('lines',line_count,'movement',movement));
+end $$;
+revoke all on function finance_close_reconciliation(uuid) from public,anon;
+grant execute on function finance_close_reconciliation(uuid) to authenticated;
+
+create or replace function finance_audit_ledger() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+declare v jsonb; v_id text; v_org uuid;
+begin
+ v:=case when tg_op='DELETE' then to_jsonb(old) else to_jsonb(new) end;
+ v_id:=v->>'id'; v_org:=(v->>'org_id')::uuid;
+ perform _audit(v_org,'finance.'||lower(tg_table_name)||'.'||lower(tg_op),tg_table_name,v_id,
+   jsonb_build_object('status',v->>'status','amount',v->>'amount','reference',v->>'reference'));
+ if tg_op='DELETE' then return old; else return new; end if;
+end $$;
+create trigger finance_invoice_payments_audit after insert or update or delete on invoice_payments for each row execute function finance_audit_ledger();
+create trigger finance_vendor_payments_audit after insert or update or delete on vendor_payments for each row execute function finance_audit_ledger();
+create trigger finance_budgets_audit after insert or update or delete on department_budgets for each row execute function finance_audit_ledger();
+create trigger finance_reconciliations_audit after insert or update or delete on bank_reconciliations for each row execute function finance_audit_ledger();
+create trigger finance_statement_lines_audit after insert or update or delete on bank_statement_lines for each row execute function finance_audit_ledger();
+
+-- Finance operators must be able to choose the org's clients/projects on invoices and cost allocations.
+create policy finance_clients_read on clients for select to authenticated using(org_id=current_org_id() and (has_perm('finance.view') or has_perm('finance.manage')));
+create policy finance_projects_read on projects for select to authenticated using(org_id=current_org_id() and (has_perm('finance.view') or has_perm('finance.manage')));
+
+-- Avoid duplicate budget rows when one of the optional dimensions is NULL.
+create unique index department_budgets_project_unique on department_budgets(org_id,project_id,period_start,category) where department_id is null;
+create unique index department_budgets_department_unique on department_budgets(org_id,department_id,period_start,category) where project_id is null;
+
+-- Keep the SQL grant guard aligned with the application permission catalogue.
+create or replace function is_sensitive_permission(p text) returns boolean language sql immutable as $$
+  select p like 'payroll.%' or p like 'salary.%' or p like 'finance.%'
+      or p in ('roles.manage','audit.view','settings.manage')
+$$;
+-- Block 05: Projects & Operations + internal communication workspace.
+-- All objects are tenant-scoped. Messages are append-only; time approvals are RPC-only.
+
+create table project_milestones (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  project_id uuid not null references projects(id) on delete cascade, title text not null check(length(trim(title)) between 2 and 180),
+  description text, owner_id uuid references employees(id) on delete set null, due_date date,
+  status text not null default 'PENDING' check(status in ('PENDING','IN_PROGRESS','COMPLETED','AT_RISK')),
+  sort_order int not null default 0, created_by uuid not null references employees(id), created_at timestamptz not null default now(),
+  completed_at timestamptz
+);
+create index project_milestones_project_idx on project_milestones(project_id,sort_order,due_date);
+
+create table project_updates (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  project_id uuid not null references projects(id) on delete cascade, author_id uuid not null references employees(id),
+  update_type text not null default 'UPDATE' check(update_type in ('UPDATE','RISK','DECISION','MILESTONE')),
+  body text not null check(length(trim(body)) between 2 and 5000), created_at timestamptz not null default now()
+);
+create index project_updates_feed_idx on project_updates(project_id,created_at desc);
+
+create table project_time_entries (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  project_id uuid not null references projects(id) on delete cascade, task_id uuid references tasks(id) on delete set null,
+  employee_id uuid not null references employees(id), work_date date not null, hours numeric(6,2) not null check(hours > 0 and hours <= 24),
+  notes text not null check(length(trim(notes)) between 2 and 1000), billable boolean not null default true,
+  status text not null default 'SUBMITTED' check(status in ('SUBMITTED','APPROVED','REJECTED')),
+  decided_by uuid references employees(id), decided_at timestamptz, decision_note text, created_at timestamptz not null default now(),
+  check ((status='SUBMITTED' and decided_by is null and decided_at is null) or (status<>'SUBMITTED' and decided_by is not null and decided_at is not null))
+);
+create index project_time_entries_project_idx on project_time_entries(project_id,work_date desc);
+create index project_time_entries_employee_idx on project_time_entries(employee_id,work_date desc);
+
+create or replace function is_project_workspace_member(p_project uuid) returns boolean
+language sql stable security definer set search_path=public,pg_temp as $$
+ select exists(select 1 from projects p where p.id=p_project and p.org_id=current_org_id()
+   and (p.manager_id=current_employee_id() or exists(select 1 from project_members pm where pm.project_id=p.id and pm.employee_id=current_employee_id())))
+$$;
+revoke all on function is_project_workspace_member(uuid) from public,anon;
+grant execute on function is_project_workspace_member(uuid) to authenticated;
+
+alter table project_milestones enable row level security;
+alter table project_updates enable row level security;
+alter table project_time_entries enable row level security;
+create policy milestone_read on project_milestones for select to authenticated using(org_id=current_org_id() and (has_perm('projects.view_all') or is_project_workspace_member(project_id)));
+create policy milestone_write on project_milestones for all to authenticated using(org_id=current_org_id() and (has_perm('projects.manage') or exists(select 1 from projects p where p.id=project_id and p.manager_id=current_employee_id()))) with check(org_id=current_org_id() and (has_perm('projects.manage') or exists(select 1 from projects p where p.id=project_id and p.manager_id=current_employee_id())));
+create policy project_update_read on project_updates for select to authenticated using(org_id=current_org_id() and (has_perm('projects.view_all') or is_project_workspace_member(project_id)));
+create policy project_update_insert on project_updates for insert to authenticated with check(org_id=current_org_id() and author_id=current_employee_id() and is_project_workspace_member(project_id));
+create policy project_time_read on project_time_entries for select to authenticated using(org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('projects.view_all') or has_perm('projects.manage') or is_project_workspace_member(project_id)));
+create policy project_time_insert on project_time_entries for insert to authenticated with check(org_id=current_org_id() and employee_id=current_employee_id() and status='SUBMITTED' and decided_by is null and is_project_workspace_member(project_id));
+
+create or replace function decide_project_time_entry(p_entry uuid,p_approve boolean,p_note text default null) returns void
+language plpgsql security definer set search_path=public,pg_temp as $$
+declare v project_time_entries;
+begin
+ if not (has_perm('projects.manage') or has_perm('projects.time_approve')) then raise exception 'project time approval permission required' using errcode='42501'; end if;
+ select * into v from project_time_entries where id=p_entry and org_id=current_org_id() for update;
+ if v.id is null or v.status<>'SUBMITTED' then raise exception 'time entry unavailable or already decided'; end if;
+ if v.employee_id=current_employee_id() then raise exception 'cannot approve your own time entry' using errcode='42501'; end if;
+ update project_time_entries set status=case when p_approve then 'APPROVED' else 'REJECTED' end,
+  decided_by=current_employee_id(),decided_at=now(),decision_note=left(p_note,1000) where id=p_entry;
+ perform _audit(current_org_id(),case when p_approve then 'project.time.approved' else 'project.time.rejected' end,'project_time_entry',p_entry::text,jsonb_build_object('hours',v.hours,'project_id',v.project_id));
+end $$;
+revoke all on function decide_project_time_entry(uuid,boolean,text) from public,anon;
+grant execute on function decide_project_time_entry(uuid,boolean,text) to authenticated;
+
+-- Communication: channels include org-wide, department, project, private group and direct conversations.
+create table chat_channels (
+ id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+ name text not null check(length(trim(name)) between 1 and 100), description text,
+ channel_type text not null check(channel_type in ('PUBLIC','DEPARTMENT','PROJECT','GROUP','DIRECT')),
+ department_id uuid references departments(id) on delete cascade, project_id uuid references projects(id) on delete cascade,
+ direct_key text, created_by uuid not null references employees(id), archived_at timestamptz,
+ created_at timestamptz not null default now(),
+ check ((channel_type='DEPARTMENT')=(department_id is not null)),
+ check ((channel_type='PROJECT')=(project_id is not null)),
+ check ((channel_type='DIRECT')=(direct_key is not null)),
+ unique(org_id,direct_key)
+);
+create index chat_channels_org_type_idx on chat_channels(org_id,channel_type,created_at desc);
+
+create table chat_channel_members (
+ channel_id uuid not null references chat_channels(id) on delete cascade,
+ employee_id uuid not null references employees(id) on delete cascade,
+ member_role text not null default 'MEMBER' check(member_role in ('OWNER','MODERATOR','MEMBER')),
+ joined_at timestamptz not null default now(), last_read_at timestamptz,
+ primary key(channel_id,employee_id)
+);
+create index chat_members_employee_idx on chat_channel_members(employee_id,channel_id);
+
+create table chat_messages (
+ id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+ channel_id uuid not null references chat_channels(id) on delete cascade,
+ author_id uuid not null references employees(id), body text not null check(length(trim(body)) between 1 and 10000),
+ parent_message_id uuid references chat_messages(id) on delete set null,
+ edited_at timestamptz, deleted_at timestamptz, created_at timestamptz not null default now()
+);
+create index chat_messages_channel_idx on chat_messages(channel_id,created_at desc);
+
+create table chat_reactions (
+ id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+ message_id uuid not null references chat_messages(id) on delete cascade, employee_id uuid not null references employees(id) on delete cascade,
+ reaction text not null check(reaction in ('👍','❤️','😂','🎉','👀','🙏')), created_at timestamptz not null default now(), unique(message_id,employee_id,reaction)
+);
+create index chat_reactions_message_idx on chat_reactions(message_id);
+
+create or replace function is_chat_member(p_channel uuid) returns boolean
+language sql stable security definer set search_path=public,pg_temp as $$
+ select exists(select 1 from chat_channel_members m join chat_channels c on c.id=m.channel_id
+  where m.channel_id=p_channel and m.employee_id=current_employee_id() and c.org_id=current_org_id() and c.archived_at is null)
+$$;
+revoke all on function is_chat_member(uuid) from public,anon;
+grant execute on function is_chat_member(uuid) to authenticated;
+
+alter table chat_channels enable row level security;
+alter table chat_channel_members enable row level security;
+alter table chat_messages enable row level security;
+alter table chat_reactions enable row level security;
+create policy chat_channels_read on chat_channels for select to authenticated using(org_id=current_org_id() and archived_at is null and
+ (channel_type='PUBLIC' or (channel_type='DEPARTMENT' and department_id=(select department_id from employees where id=current_employee_id())) or is_chat_member(id)));
+create policy chat_channels_create on chat_channels for insert to authenticated with check(org_id=current_org_id() and created_by=current_employee_id() and (has_perm('communication.manage') or channel_type in ('GROUP','DIRECT')));
+create policy chat_channels_manage on chat_channels for update to authenticated using(org_id=current_org_id() and (created_by=current_employee_id() or has_perm('communication.manage'))) with check(org_id=current_org_id());
+create policy chat_members_read on chat_channel_members for select to authenticated using(is_chat_member(channel_id) or employee_id=current_employee_id() or has_perm('communication.manage'));
+create policy chat_members_add on chat_channel_members for insert to authenticated with check(employee_id=current_employee_id() or exists(select 1 from chat_channels c where c.id=channel_id and c.created_by=current_employee_id()) or has_perm('communication.manage'));
+create policy chat_members_update_self on chat_channel_members for update to authenticated using(employee_id=current_employee_id()) with check(employee_id=current_employee_id());
+create policy chat_messages_read on chat_messages for select to authenticated using(org_id=current_org_id() and is_chat_member(channel_id));
+create policy chat_messages_insert on chat_messages for insert to authenticated with check(org_id=current_org_id() and author_id=current_employee_id() and is_chat_member(channel_id) and deleted_at is null and edited_at is null);
+create policy chat_messages_edit_own on chat_messages for update to authenticated using(author_id=current_employee_id() and created_at>now()-interval '15 minutes' and is_chat_member(channel_id)) with check(author_id=current_employee_id() and created_at>now()-interval '15 minutes' and is_chat_member(channel_id));
+create policy chat_reactions_read on chat_reactions for select to authenticated using(org_id=current_org_id() and exists(select 1 from chat_messages m where m.id=message_id and is_chat_member(m.channel_id)));
+create policy chat_reactions_add on chat_reactions for insert to authenticated with check(org_id=current_org_id() and employee_id=current_employee_id() and exists(select 1 from chat_messages m where m.id=message_id and is_chat_member(m.channel_id)));
+create policy chat_reactions_remove on chat_reactions for delete to authenticated using(employee_id=current_employee_id() and org_id=current_org_id());
+
+-- A private bucket: object path is org/channel/employee/filename. Membership is checked for reads.
+insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types)
+ values('chat-files','chat-files',false,15728640,array['application/pdf','image/jpeg','image/png','image/webp','text/plain','application/zip'])
+ on conflict(id) do update set public=false,file_size_limit=15728640,allowed_mime_types=excluded.allowed_mime_types;
+create policy chat_files_read on storage.objects for select to authenticated using(bucket_id='chat-files' and split_part(name,'/',1)=current_org_id()::text and is_chat_member(split_part(name,'/',2)::uuid));
+create policy chat_files_insert on storage.objects for insert to authenticated with check(bucket_id='chat-files' and split_part(name,'/',1)=current_org_id()::text and split_part(name,'/',3)=current_employee_id()::text and is_chat_member(split_part(name,'/',2)::uuid));
+create policy chat_files_delete on storage.objects for delete to authenticated using(bucket_id='chat-files' and split_part(name,'/',1)=current_org_id()::text and split_part(name,'/',3)=current_employee_id()::text);
+
+-- Permission catalogue additions; existing organisations receive them too.
+insert into role_permissions(org_id,role,permission)
+select o.id, r.role, p.permission from organizations o
+cross join (values ('ADMIN'::app_role),('OPERATIONS_MANAGER'::app_role),('PROJECT_MANAGER'::app_role),('DEPARTMENT_MANAGER'::app_role),('TEAM_LEAD'::app_role)) r(role)
+cross join (values ('communication.view'),('communication.send'),('projects.time_log'),('projects.time_approve'),('projects.updates')) p(permission)
+on conflict do nothing;
+insert into role_permissions(org_id,role,permission)
+select o.id, r.role, p.permission from organizations o
+cross join (values ('EMPLOYEE'::app_role),('INTERN'::app_role),('SALES_EXECUTIVE'::app_role)) r(role)
+cross join (values ('communication.view'),('communication.send'),('projects.time_log'),('projects.updates')) p(permission)
+on conflict do nothing;
+insert into role_permissions(org_id,role,permission)
+select o.id, 'HR_MANAGER'::app_role, p.permission from organizations o
+cross join (values ('communication.view'),('communication.send'),('projects.updates')) p(permission)
+on conflict do nothing;
+
+-- Keep message records in the Supabase Realtime publication for clients that enable realtime auth.
+do $$ begin
+ if exists(select 1 from pg_publication where pubname='supabase_realtime') and not exists(
+   select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='chat_messages') then
+   alter publication supabase_realtime add table public.chat_messages;
+ end if;
+end $$;
+
+-- Message attachments are private and visible only to channel members.
+create table chat_attachments (
+ id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+ channel_id uuid not null references chat_channels(id) on delete cascade, message_id uuid not null references chat_messages(id) on delete cascade,
+ uploaded_by uuid not null references employees(id), storage_path text not null unique, file_name text not null,
+ mime_type text not null check(mime_type in ('application/pdf','image/jpeg','image/png','image/webp','text/plain','application/zip')),
+ file_size bigint not null check(file_size between 1 and 15728640), created_at timestamptz not null default now()
+);
+alter table chat_attachments enable row level security;
+create policy chat_attachments_read on chat_attachments for select to authenticated using(org_id=current_org_id() and is_chat_member(channel_id));
+create policy chat_attachments_insert on chat_attachments for insert to authenticated with check(org_id=current_org_id() and uploaded_by=current_employee_id() and is_chat_member(channel_id) and exists(select 1 from chat_messages m where m.id=chat_attachments.message_id and m.channel_id=chat_attachments.channel_id and m.author_id=current_employee_id()));
+create policy chat_members_public_join on chat_channel_members for insert to authenticated with check(employee_id=current_employee_id() and exists(select 1 from chat_channels c where c.id=channel_id and c.org_id=current_org_id() and c.channel_type in ('PUBLIC','DEPARTMENT')));
+drop policy chat_members_public_join on chat_channel_members;
+create policy chat_members_public_join on chat_channel_members for insert to authenticated with check(
+ employee_id=current_employee_id() and exists(select 1 from chat_channels c where c.id=channel_id and c.org_id=current_org_id() and
+  (c.channel_type='PUBLIC' or (c.channel_type='DEPARTMENT' and c.department_id=(select e.department_id from employees e where e.id=current_employee_id())))));
+
+create or replace function open_direct_conversation(p_employee uuid) returns uuid
+language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_key text; v_channel uuid; v_other employees;
+begin
+ if p_employee=current_employee_id() then raise exception 'cannot open a direct conversation with yourself'; end if;
+ select * into v_other from employees where id=p_employee and org_id=current_org_id() and status<>'EXITED';
+ if v_other.id is null then raise exception 'employee not found in this organisation'; end if;
+ v_key:=least(current_employee_id()::text,p_employee::text)||':'||greatest(current_employee_id()::text,p_employee::text);
+ insert into chat_channels(org_id,name,channel_type,direct_key,created_by)
+ values(current_org_id(),v_other.full_name,'DIRECT',v_key,current_employee_id())
+ on conflict(org_id,direct_key) do update set direct_key=excluded.direct_key returning id into v_channel;
+ insert into chat_channel_members(channel_id,employee_id,member_role) values(v_channel,current_employee_id(),'OWNER'),(v_channel,p_employee,'MEMBER') on conflict do nothing;
+ return v_channel;
+end $$;
+revoke all on function open_direct_conversation(uuid) from public,anon;
+grant execute on function open_direct_conversation(uuid) to authenticated;
+
+-- Company announcements (separate from chat so important notices remain discoverable).
+create table company_announcements (
+ id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+ title text not null check(length(trim(title)) between 3 and 180), body text not null check(length(trim(body)) between 3 and 10000),
+ audience text not null default 'ALL' check(audience in ('ALL','DEPARTMENT','PROJECT')),
+ department_id uuid references departments(id) on delete cascade, project_id uuid references projects(id) on delete cascade,
+ pinned boolean not null default false, published_at timestamptz not null default now(), expires_at timestamptz,
+ created_by uuid not null references employees(id), created_at timestamptz not null default now(),
+ check ((audience='DEPARTMENT')=(department_id is not null)), check ((audience='PROJECT')=(project_id is not null))
+);
+create index announcements_feed_idx on company_announcements(org_id,pinned desc,published_at desc);
+alter table company_announcements enable row level security;
+create policy announcements_read on company_announcements for select to authenticated using(org_id=current_org_id() and published_at<=now() and (expires_at is null or expires_at>now()) and (audience='ALL' or (audience='DEPARTMENT' and department_id=(select department_id from employees where id=current_employee_id())) or (audience='PROJECT' and is_project_workspace_member(project_id))));
+create policy announcements_write on company_announcements for all to authenticated using(org_id=current_org_id() and has_perm('communication.manage')) with check(org_id=current_org_id() and created_by=current_employee_id() and has_perm('communication.manage'));
+
+-- Project managers can create a project channel and seed membership from the workspace roster.
+drop policy chat_channels_create on chat_channels;
+create policy chat_channels_create on chat_channels for insert to authenticated with check(org_id=current_org_id() and created_by=current_employee_id() and
+ (has_perm('communication.manage') or channel_type in ('GROUP','DIRECT') or (channel_type='PROJECT' and has_perm('projects.manage'))));
+insert into role_permissions(org_id,role,permission)
+select o.id,r.role,'projects.workspace_view' from organizations o
+cross join (values ('EMPLOYEE'::app_role),('INTERN'::app_role),('SALES_EXECUTIVE'::app_role),('TEAM_LEAD'::app_role),('DEPARTMENT_MANAGER'::app_role),('PROJECT_MANAGER'::app_role),('OPERATIONS_MANAGER'::app_role),('ADMIN'::app_role)) r(role)
+on conflict do nothing;
+drop policy chat_channels_read on chat_channels;
+create policy chat_channels_read on chat_channels for select to authenticated using(org_id=current_org_id() and archived_at is null and
+ (created_by=current_employee_id() or channel_type='PUBLIC' or (channel_type='DEPARTMENT' and department_id=(select department_id from employees where id=current_employee_id())) or is_chat_member(id)));
+insert into role_permissions(org_id,role,permission)
+select o.id,r.role,'communication.manage' from organizations o
+cross join (values ('ADMIN'::app_role),('OPERATIONS_MANAGER'::app_role),('HR_MANAGER'::app_role)) r(role)
+on conflict do nothing;
+-- Project managers may maintain membership of the matching project channel.
+drop policy chat_members_add on chat_channel_members;
+create policy chat_members_add on chat_channel_members for insert to authenticated with check(
+ employee_id=current_employee_id() or has_perm('communication.manage') or
+ exists(select 1 from chat_channels c where c.id=channel_id and c.created_by=current_employee_id()) or
+ (has_perm('projects.manage') and exists(select 1 from chat_channels c where c.id=channel_id and c.channel_type='PROJECT' and has_perm('projects.manage'))));
+
+create or replace function open_direct_conversation(p_employee uuid) returns uuid
+language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_key text; v_channel uuid; v_other employees;
+begin
+ if p_employee=current_employee_id() then raise exception 'cannot open a direct conversation with yourself'; end if;
+ select * into v_other from employees where id=p_employee and org_id=current_org_id() and status<>'EXITED';
+ if v_other.id is null then raise exception 'employee not found in this organisation'; end if;
+ v_key:=least(current_employee_id()::text,p_employee::text)||':'||greatest(current_employee_id()::text,p_employee::text);
+ insert into chat_channels(org_id,name,channel_type,direct_key,created_by)
+ values(current_org_id(),'Direct message','DIRECT',v_key,current_employee_id())
+ on conflict(org_id,direct_key) do update set direct_key=excluded.direct_key returning id into v_channel;
+ insert into chat_channel_members(channel_id,employee_id,member_role) values(v_channel,current_employee_id(),'OWNER'),(v_channel,p_employee,'MEMBER') on conflict do nothing;
+ return v_channel;
+end $$;
+
+-- Tighten channel membership: only public/department self-join, channel creator,
+-- communication managers, or project managers managing a project room can add members.
+drop policy chat_members_add on chat_channel_members;
+create policy chat_members_add on chat_channel_members for insert to authenticated with check(
+ has_perm('communication.manage') or
+ exists(select 1 from chat_channels c where c.id=channel_id and c.created_by=current_employee_id()) or
+ (has_perm('projects.manage') and exists(select 1 from chat_channels c where c.id=channel_id and c.channel_type='PROJECT')));
+drop policy chat_channels_create on chat_channels;
+create policy chat_channels_create on chat_channels for insert to authenticated with check(org_id=current_org_id() and created_by=current_employee_id() and
+ (has_perm('communication.manage') or channel_type='GROUP' or (channel_type='PROJECT' and has_perm('projects.manage'))));
+
+create or replace function operations_org_guard() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+ if tg_table_name='project_milestones' then
+  if not exists(select 1 from projects p where p.id=new.project_id and p.org_id=new.org_id) then raise exception 'milestone project organisation mismatch' using errcode='23514'; end if;
+  if new.owner_id is not null and not exists(select 1 from employees e where e.id=new.owner_id and e.org_id=new.org_id) then raise exception 'milestone owner organisation mismatch' using errcode='23514'; end if;
+  if not exists(select 1 from employees e where e.id=new.created_by and e.org_id=new.org_id) then raise exception 'milestone creator organisation mismatch' using errcode='23514'; end if;
+ elsif tg_table_name='project_updates' then
+  if not exists(select 1 from projects p where p.id=new.project_id and p.org_id=new.org_id) or not exists(select 1 from employees e where e.id=new.author_id and e.org_id=new.org_id) then raise exception 'project update organisation mismatch' using errcode='23514'; end if;
+ elsif tg_table_name='project_time_entries' then
+  if not exists(select 1 from projects p where p.id=new.project_id and p.org_id=new.org_id) or not exists(select 1 from employees e where e.id=new.employee_id and e.org_id=new.org_id) then raise exception 'time entry organisation mismatch' using errcode='23514'; end if;
+  if new.task_id is not null and not exists(select 1 from tasks t where t.id=new.task_id and t.org_id=new.org_id and t.project_id=new.project_id) then raise exception 'time entry task must belong to the same project' using errcode='23514'; end if;
+  if new.decided_by is not null and not exists(select 1 from employees e where e.id=new.decided_by and e.org_id=new.org_id) then raise exception 'time approver organisation mismatch' using errcode='23514'; end if;
+ elsif tg_table_name='chat_channels' then
+  if not exists(select 1 from employees e where e.id=new.created_by and e.org_id=new.org_id) then raise exception 'channel creator organisation mismatch' using errcode='23514'; end if;
+  if new.project_id is not null and not exists(select 1 from projects p where p.id=new.project_id and p.org_id=new.org_id) then raise exception 'channel project organisation mismatch' using errcode='23514'; end if;
+  if new.department_id is not null and not exists(select 1 from departments d where d.id=new.department_id and d.org_id=new.org_id) then raise exception 'channel department organisation mismatch' using errcode='23514'; end if;
+ elsif tg_table_name='chat_channel_members' then
+  if not exists(select 1 from chat_channels c join employees e on e.id=new.employee_id where c.id=new.channel_id and c.org_id=e.org_id) then raise exception 'channel member organisation mismatch' using errcode='23514'; end if;
+ elsif tg_table_name='chat_messages' then
+  if not exists(select 1 from chat_channels c where c.id=new.channel_id and c.org_id=new.org_id) or not exists(select 1 from employees e where e.id=new.author_id and e.org_id=new.org_id) then raise exception 'message organisation mismatch' using errcode='23514'; end if;
+  if new.parent_message_id is not null and not exists(select 1 from chat_messages m where m.id=new.parent_message_id and m.channel_id=new.channel_id) then raise exception 'reply parent must belong to the same channel' using errcode='23514'; end if;
+ elsif tg_table_name='chat_attachments' then
+  if not exists(select 1 from chat_messages m where m.id=new.message_id and m.channel_id=new.channel_id and m.org_id=new.org_id and m.author_id=new.uploaded_by) then raise exception 'attachment message mismatch' using errcode='23514'; end if;
+  if new.storage_path not like new.org_id::text||'/'||new.channel_id::text||'/'||new.uploaded_by::text||'/%' or not exists(select 1 from storage.objects o where o.bucket_id='chat-files' and o.name=new.storage_path) then raise exception 'attachment must reference the uploader private object' using errcode='23514'; end if;
+ elsif tg_table_name='chat_reactions' then
+  if not exists(select 1 from chat_messages m where m.id=new.message_id and m.org_id=new.org_id) or not exists(select 1 from employees e where e.id=new.employee_id and e.org_id=new.org_id) then raise exception 'reaction organisation mismatch' using errcode='23514'; end if;
+ elsif tg_table_name='company_announcements' then
+  if not exists(select 1 from employees e where e.id=new.created_by and e.org_id=new.org_id) then raise exception 'announcement author organisation mismatch' using errcode='23514'; end if;
+  if new.department_id is not null and not exists(select 1 from departments d where d.id=new.department_id and d.org_id=new.org_id) then raise exception 'announcement department mismatch' using errcode='23514'; end if;
+  if new.project_id is not null and not exists(select 1 from projects p where p.id=new.project_id and p.org_id=new.org_id) then raise exception 'announcement project mismatch' using errcode='23514'; end if;
+ end if;
+ return new;
+end $$;
+create trigger project_milestones_org_guard before insert or update on project_milestones for each row execute function operations_org_guard();
+create trigger project_updates_org_guard before insert or update on project_updates for each row execute function operations_org_guard();
+create trigger project_time_org_guard before insert or update on project_time_entries for each row execute function operations_org_guard();
+create trigger chat_channels_org_guard before insert or update on chat_channels for each row execute function operations_org_guard();
+create trigger chat_members_org_guard before insert or update on chat_channel_members for each row execute function operations_org_guard();
+create trigger chat_messages_org_guard before insert or update on chat_messages for each row execute function operations_org_guard();
+create trigger chat_attachments_org_guard before insert or update on chat_attachments for each row execute function operations_org_guard();
+create trigger chat_reactions_org_guard before insert or update on chat_reactions for each row execute function operations_org_guard();
+create trigger announcements_org_guard before insert or update on company_announcements for each row execute function operations_org_guard();
+
+-- Keep the permission seeder current for organisations bootstrapped after migration 0011.
+create or replace function seed_default_permissions(p_org uuid) returns void
+language plpgsql security definer set search_path=public,pg_temp as $$
+declare
+ m jsonb := jsonb_build_object(
+  'ADMIN',jsonb_build_array('people.view_all','people.manage','attendance.view_all','attendance.approve','attendance.manage','leave.view_all','leave.approve','leave.manage','tasks.view_all','tasks.manage','tasks.review','projects.view_all','projects.manage','projects.workspace_view','projects.time_log','projects.time_approve','projects.updates','crm.view_all','crm.manage','crm.assign','clients.view_all','clients.manage','performance.view_all','performance.review','performance.configure','reports.view_org','settings.manage','roles.manage','audit.view','finance.view','finance.manage','finance.approve_manager','finance.approve_all','finance.approve','finance.pay','finance.export','communication.view','communication.send','communication.manage'),
+  'HR_MANAGER',jsonb_build_array('people.view_all','people.manage','attendance.view_all','attendance.approve','attendance.manage','leave.view_all','leave.approve','leave.manage','performance.view_all','performance.review','performance.configure','payroll.view_all','payroll.manage','payroll.export','salary.manage','reports.view_org','audit.view','communication.view','communication.send','communication.manage','projects.workspace_view'),
+  'OPERATIONS_MANAGER',jsonb_build_array('people.view_all','attendance.view_all','attendance.approve','leave.view_all','leave.approve','tasks.view_all','tasks.manage','tasks.review','projects.view_all','projects.manage','projects.workspace_view','projects.time_log','projects.time_approve','projects.updates','clients.view_all','performance.view_all','performance.review','reports.view_org','communication.view','communication.send','communication.manage'),
+  'DEPARTMENT_MANAGER',jsonb_build_array('people.view_team','attendance.view_team','attendance.approve','leave.approve','tasks.view_team','tasks.manage','tasks.review','projects.manage','projects.workspace_view','projects.time_log','projects.time_approve','projects.updates','performance.view_team','performance.review','communication.view','communication.send'),
+  'TEAM_LEAD',jsonb_build_array('people.view_team','attendance.view_team','attendance.approve','leave.approve','tasks.view_team','tasks.manage','tasks.review','projects.workspace_view','projects.time_log','projects.time_approve','projects.updates','performance.view_team','performance.review','communication.view','communication.send'),
+  'SALES_EXECUTIVE',jsonb_build_array('crm.manage','clients.view_all','projects.workspace_view','projects.time_log','projects.updates','communication.view','communication.send'),
+  'PROJECT_MANAGER',jsonb_build_array('tasks.view_team','tasks.manage','tasks.review','projects.view_all','projects.manage','projects.workspace_view','projects.time_log','projects.time_approve','projects.updates','clients.view_all','communication.view','communication.send'),
+  'EMPLOYEE',jsonb_build_array('projects.workspace_view','projects.time_log','projects.updates','communication.view','communication.send'),
+  'INTERN',jsonb_build_array('projects.workspace_view','projects.time_log','projects.updates','communication.view','communication.send')
+ ); r text; p text;
+begin
+ for r in select jsonb_object_keys(m) loop
+  for p in select jsonb_array_elements_text(m->r) loop
+   insert into role_permissions(org_id,role,permission) values(p_org,r::app_role,p) on conflict do nothing;
+  end loop;
+ end loop;
+end $$;
+create or replace function project_member_org_guard() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+ if not exists(select 1 from projects p join employees e on e.id=new.employee_id where p.id=new.project_id and p.org_id=e.org_id) then
+  raise exception 'project member must belong to the same organisation' using errcode='23514';
+ end if;
+ return new;
+end $$;
+create trigger project_members_org_guard before insert or update on project_members for each row execute function project_member_org_guard();
+
+create or replace function notify_chat_message() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_name text;
+begin
+ select name into v_name from chat_channels where id=new.channel_id;
+ insert into notifications(org_id,recipient_id,category,title,body,link,dedupe_key)
+ select new.org_id,m.employee_id,'CHAT_MESSAGE','New message in '||coalesce(v_name,'team chat'),left(new.body,180),'/chat/'||new.channel_id::text,'chat:'||new.id::text||':'||m.employee_id::text
+ from chat_channel_members m where m.channel_id=new.channel_id and m.employee_id<>new.author_id
+ on conflict(recipient_id,dedupe_key) do nothing;
+ return new;
+end $$;
+create trigger chat_message_notify after insert on chat_messages for each row execute function notify_chat_message();
+
+create or replace function notify_announcement() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+ insert into notifications(org_id,recipient_id,category,title,body,link,dedupe_key)
+ select new.org_id,e.id,'ANNOUNCEMENT',new.title,left(new.body,180),'/announcements','announcement:'||new.id::text||':'||e.id::text
+ from employees e where e.org_id=new.org_id and e.status<>'EXITED' and e.id<>new.created_by and
+  (new.audience='ALL' or (new.audience='DEPARTMENT' and e.department_id=new.department_id) or (new.audience='PROJECT' and exists(select 1 from project_members pm where pm.project_id=new.project_id and pm.employee_id=e.id)))
+ on conflict(recipient_id,dedupe_key) do nothing;
+ perform _audit(new.org_id,'communication.announcement.published','company_announcement',new.id::text,jsonb_build_object('audience',new.audience,'pinned',new.pinned));
+ return new;
+end $$;
+create trigger announcement_notify after insert on company_announcements for each row execute function notify_announcement();
+
+-- Align RLS with the app's granular communication/project permissions.
+drop policy chat_channels_read on chat_channels;
+create policy chat_channels_read on chat_channels for select to authenticated using(org_id=current_org_id() and has_perm('communication.view') and archived_at is null and
+ (created_by=current_employee_id() or channel_type='PUBLIC' or (channel_type='DEPARTMENT' and department_id=(select department_id from employees where id=current_employee_id())) or is_chat_member(id) or (channel_type='PROJECT' and has_perm('projects.manage'))));
+drop policy chat_channels_create on chat_channels;
+create policy chat_channels_create on chat_channels for insert to authenticated with check(org_id=current_org_id() and created_by=current_employee_id() and
+ (has_perm('communication.manage') or (channel_type='GROUP' and has_perm('communication.send')) or (channel_type='PROJECT' and has_perm('projects.manage'))));
+drop policy chat_members_public_join on chat_channel_members;
+create policy chat_members_public_join on chat_channel_members for insert to authenticated with check(
+ has_perm('communication.view') and employee_id=current_employee_id() and exists(select 1 from chat_channels c where c.id=channel_id and c.org_id=current_org_id() and
+  (c.channel_type='PUBLIC' or (c.channel_type='DEPARTMENT' and c.department_id=(select e.department_id from employees e where e.id=current_employee_id())))));
+drop policy chat_members_read on chat_channel_members;
+create policy chat_members_read on chat_channel_members for select to authenticated using(has_perm('communication.view') and (is_chat_member(channel_id) or employee_id=current_employee_id() or has_perm('communication.manage')));
+drop policy chat_members_update_self on chat_channel_members;
+create policy chat_members_update_self on chat_channel_members for update to authenticated using(has_perm('communication.view') and employee_id=current_employee_id()) with check(has_perm('communication.view') and employee_id=current_employee_id());
+drop policy chat_messages_read on chat_messages;
+create policy chat_messages_read on chat_messages for select to authenticated using(org_id=current_org_id() and has_perm('communication.view') and is_chat_member(channel_id));
+drop policy chat_messages_insert on chat_messages;
+create policy chat_messages_insert on chat_messages for insert to authenticated with check(org_id=current_org_id() and has_perm('communication.send') and author_id=current_employee_id() and is_chat_member(channel_id) and deleted_at is null and edited_at is null);
+drop policy chat_messages_edit_own on chat_messages;
+create policy chat_messages_edit_own on chat_messages for update to authenticated using(has_perm('communication.send') and author_id=current_employee_id() and created_at>now()-interval '15 minutes' and is_chat_member(channel_id)) with check(org_id=current_org_id() and has_perm('communication.send') and author_id=current_employee_id() and created_at>now()-interval '15 minutes' and is_chat_member(channel_id));
+drop policy chat_reactions_read on chat_reactions;
+create policy chat_reactions_read on chat_reactions for select to authenticated using(org_id=current_org_id() and has_perm('communication.view') and exists(select 1 from chat_messages m where m.id=message_id and is_chat_member(m.channel_id)));
+drop policy chat_reactions_add on chat_reactions;
+create policy chat_reactions_add on chat_reactions for insert to authenticated with check(org_id=current_org_id() and has_perm('communication.send') and employee_id=current_employee_id() and exists(select 1 from chat_messages m where m.id=message_id and is_chat_member(m.channel_id)));
+drop policy chat_attachments_read on chat_attachments;
+create policy chat_attachments_read on chat_attachments for select to authenticated using(org_id=current_org_id() and has_perm('communication.view') and is_chat_member(channel_id));
+drop policy chat_attachments_insert on chat_attachments;
+create policy chat_attachments_insert on chat_attachments for insert to authenticated with check(org_id=current_org_id() and has_perm('communication.send') and uploaded_by=current_employee_id() and is_chat_member(channel_id) and exists(select 1 from chat_messages m where m.id=chat_attachments.message_id and m.channel_id=chat_attachments.channel_id and m.author_id=current_employee_id()));
+drop policy announcements_read on company_announcements;
+create policy announcements_read on company_announcements for select to authenticated using(org_id=current_org_id() and has_perm('communication.view') and published_at<=now() and (expires_at is null or expires_at>now()) and (audience='ALL' or (audience='DEPARTMENT' and department_id=(select department_id from employees where id=current_employee_id())) or (audience='PROJECT' and is_project_workspace_member(project_id))));
+drop policy project_update_insert on project_updates;
+create policy project_update_insert on project_updates for insert to authenticated with check(org_id=current_org_id() and has_perm('projects.updates') and author_id=current_employee_id() and is_project_workspace_member(project_id));
+drop policy project_time_insert on project_time_entries;
+create policy project_time_insert on project_time_entries for insert to authenticated with check(org_id=current_org_id() and has_perm('projects.time_log') and employee_id=current_employee_id() and status='SUBMITTED' and decided_by is null and is_project_workspace_member(project_id));
+
+create unique index chat_project_channel_unique on chat_channels(org_id,project_id) where channel_type='PROJECT';
+drop policy chat_files_read on storage.objects;
+create policy chat_files_read on storage.objects for select to authenticated using(bucket_id='chat-files' and has_perm('communication.view') and split_part(name,'/',1)=current_org_id()::text and is_chat_member(split_part(name,'/',2)::uuid));
+drop policy chat_files_insert on storage.objects;
+create policy chat_files_insert on storage.objects for insert to authenticated with check(bucket_id='chat-files' and has_perm('communication.send') and split_part(name,'/',1)=current_org_id()::text and split_part(name,'/',3)=current_employee_id()::text and is_chat_member(split_part(name,'/',2)::uuid));
+
+drop policy chat_reactions_remove on chat_reactions;
+create policy chat_reactions_remove on chat_reactions for delete to authenticated using(employee_id=current_employee_id() and org_id=current_org_id() and has_perm('communication.send'));
+drop policy chat_files_delete on storage.objects;
+create policy chat_files_delete on storage.objects for delete to authenticated using(bucket_id='chat-files' and has_perm('communication.send') and split_part(name,'/',1)=current_org_id()::text and split_part(name,'/',3)=current_employee_id()::text);
+
+create or replace function chat_message_update_guard() returns trigger language plpgsql as $$
+begin
+ if old.id<>new.id or old.org_id<>new.org_id or old.channel_id<>new.channel_id or old.author_id<>new.author_id or old.created_at<>new.created_at or old.parent_message_id is distinct from new.parent_message_id then raise exception 'message identity and thread cannot be changed'; end if;
+ return new;
+end $$;
+create trigger chat_message_update_guard before update on chat_messages for each row execute function chat_message_update_guard();
+
+-- Read receipts are the only mutable membership column. Prevent self-promotion and
+-- prevent a creator from changing a private group into a public channel via direct UPDATE.
+revoke update on chat_channel_members from authenticated;
+grant update(last_read_at) on chat_channel_members to authenticated;
+revoke update on chat_channels from authenticated;
+drop policy chat_members_public_join on chat_channel_members;
+create policy chat_members_public_join on chat_channel_members for insert to authenticated with check(
+ has_perm('communication.view') and employee_id=current_employee_id() and member_role='MEMBER' and exists(select 1 from chat_channels c where c.id=channel_id and c.org_id=current_org_id() and
+  (c.channel_type='PUBLIC' or (c.channel_type='DEPARTMENT' and c.department_id=(select e.department_id from employees e where e.id=current_employee_id())))));
+
+create or replace function chat_message_update_guard() returns trigger language plpgsql as $$
+begin
+ if old.id<>new.id or old.org_id<>new.org_id or old.channel_id<>new.channel_id or old.author_id<>new.author_id or old.created_at<>new.created_at or old.parent_message_id is distinct from new.parent_message_id then raise exception 'message identity and thread cannot be changed'; end if;
+ if old.body is distinct from new.body then new.edited_at:=now(); end if;
+ return new;
+end $$;
+drop policy project_time_read on project_time_entries;
+create policy project_time_read on project_time_entries for select to authenticated using(org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('projects.view_all') or has_perm('projects.manage') or has_perm('projects.time_approve') or is_project_workspace_member(project_id)));
+create or replace function project_org_guard() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+ if new.manager_id is not null and not exists(select 1 from employees e where e.id=new.manager_id and e.org_id=new.org_id) then raise exception 'project manager must belong to the organisation' using errcode='23514'; end if;
+ if new.client_id is not null and not exists(select 1 from clients c where c.id=new.client_id and c.org_id=new.org_id) then raise exception 'project client must belong to the organisation' using errcode='23514'; end if;
+ return new;
+end $$;
+create trigger projects_org_guard before insert or update on projects for each row execute function project_org_guard();
+-- Block 06: hardened communication controls, moderation workflow and permission auditing.
+-- All administrative mutations are permission-checked in PostgreSQL; client UI is not trusted.
+
+-- New granular permissions. Existing role defaults are deliberately conservative.
+insert into role_permissions(org_id,role,permission)
+select o.id,r.role,'communication.moderate' from organizations o
+cross join (values ('SUPER_ADMIN'::app_role),('ADMIN'::app_role),('HR_MANAGER'::app_role)) r(role)
+on conflict do nothing;
+insert into role_permissions(org_id,role,permission)
+select o.id,r.role,'communication.channel_manage' from organizations o
+cross join (values ('SUPER_ADMIN'::app_role),('ADMIN'::app_role),('HR_MANAGER'::app_role),('OPERATIONS_MANAGER'::app_role)) r(role)
+on conflict do nothing;
+
+-- Reports are visible only to designated moderators. Reporters can see their own reports.
+create table chat_message_reports (
+ id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+ channel_id uuid not null references chat_channels(id) on delete cascade,
+ message_id uuid not null references chat_messages(id) on delete cascade,
+ reporter_id uuid not null references employees(id) on delete cascade,
+ reason text not null check(reason in ('HARASSMENT','SPAM','CONFIDENTIAL_DATA','INAPPROPRIATE','OTHER')),
+ details text check(details is null or length(details)<=2000),
+ status text not null default 'OPEN' check(status in ('OPEN','REVIEWING','DISMISSED','ACTIONED')),
+ reviewed_by uuid references employees(id), reviewed_at timestamptz, resolution text,
+ created_at timestamptz not null default now(),
+ unique(message_id,reporter_id),
+ check ((status in ('OPEN','REVIEWING') and reviewed_by is null and reviewed_at is null) or (status in ('DISMISSED','ACTIONED') and reviewed_by is not null and reviewed_at is not null))
+);
+create index chat_reports_queue_idx on chat_message_reports(org_id,status,created_at desc);
+alter table chat_message_reports enable row level security;
+create policy chat_reports_insert on chat_message_reports for insert to authenticated with check(
+ org_id=current_org_id() and reporter_id=current_employee_id() and has_perm('communication.view') and
+ exists(select 1 from chat_messages m where m.id=chat_message_reports.message_id and m.channel_id=chat_message_reports.channel_id and m.org_id=current_org_id() and m.author_id<>current_employee_id()) and is_chat_member(channel_id));
+create policy chat_reports_read on chat_message_reports for select to authenticated using(
+ org_id=current_org_id() and (reporter_id=current_employee_id() or has_perm('communication.moderate')));
+
+create table chat_moderation_events (
+ id bigint generated always as identity primary key, org_id uuid not null references organizations(id) on delete cascade,
+ actor_id uuid references employees(id) on delete set null, action text not null,
+ channel_id uuid references chat_channels(id) on delete set null, message_id uuid references chat_messages(id) on delete set null,
+ target_employee_id uuid references employees(id) on delete set null, details jsonb not null default '{}', created_at timestamptz not null default now()
+);
+create index chat_moderation_events_org_idx on chat_moderation_events(org_id,created_at desc);
+alter table chat_moderation_events enable row level security;
+create policy chat_moderation_events_read on chat_moderation_events for select to authenticated using(org_id=current_org_id() and has_perm('communication.moderate'));
+
+-- Membership changes are RPC-only; clients cannot self-promote or add arbitrary people with table writes.
+revoke insert,delete,update on chat_channel_members from authenticated;
+grant update(last_read_at) on chat_channel_members to authenticated;
+drop policy if exists chat_members_add on chat_channel_members;
+drop policy if exists chat_members_public_join on chat_channel_members;
+drop policy if exists chat_members_update_self on chat_channel_members;
+create policy chat_members_public_join on chat_channel_members for insert to authenticated with check(
+ has_perm('communication.view') and employee_id=current_employee_id() and member_role='MEMBER' and exists(
+  select 1 from chat_channels c where c.id=channel_id and c.org_id=current_org_id() and c.archived_at is null and
+  (c.channel_type='PUBLIC' or (c.channel_type='DEPARTMENT' and c.department_id=(select e.department_id from employees e where e.id=current_employee_id())))));
+drop policy if exists chat_members_read on chat_channel_members;
+create policy chat_members_read on chat_channel_members for select to authenticated using(
+ exists(select 1 from chat_channels c where c.id=channel_id and c.org_id=current_org_id()) and
+ (has_perm('communication.view') or has_perm('communication.moderate')) and (employee_id=current_employee_id() or is_chat_member(channel_id) or has_perm('communication.channel_manage')));
+create policy chat_members_read_receipt_update on chat_channel_members for update to authenticated
+ using(has_perm('communication.view') and employee_id=current_employee_id() and is_chat_member(channel_id))
+ with check(has_perm('communication.view') and employee_id=current_employee_id() and is_chat_member(channel_id));
+
+create or replace function manage_chat_member(p_channel uuid,p_employee uuid,p_action text,p_role text default 'MEMBER') returns void
+language plpgsql security definer set search_path=public,pg_temp as $$
+declare v chat_channels; v_actor_role text; v_target_role text;
+begin
+ if p_action not in ('ADD','REMOVE','ROLE','LEAVE') or p_role not in ('OWNER','MODERATOR','MEMBER') or (p_action='ROLE' and p_role='OWNER') then raise exception 'invalid membership operation' using errcode='22023'; end if;
+ select * into v from chat_channels where id=p_channel and org_id=current_org_id() and archived_at is null for update;
+ if v.id is null then raise exception 'channel unavailable' using errcode='42501'; end if;
+ if p_action='LEAVE' then
+  if p_employee<>current_employee_id() or v.channel_type='DIRECT' then raise exception 'only self-leave is allowed; direct-message membership is immutable' using errcode='42501'; end if;
+ elsif not (has_perm('communication.channel_manage') or (v.channel_type='PROJECT' and has_perm('projects.manage') and is_project_workspace_member(v.project_id)) or v.created_by=current_employee_id() or exists(select 1 from chat_channel_members m where m.channel_id=p_channel and m.employee_id=current_employee_id() and m.member_role in ('OWNER','MODERATOR'))) then
+  raise exception 'channel owner or channel management permission required' using errcode='42501'; end if;
+ if not exists(select 1 from employees e where e.id=p_employee and e.org_id=current_org_id() and e.status<>'EXITED') then raise exception 'employee is not active in this organisation' using errcode='23503'; end if;
+ if p_action in ('ADD','ROLE') and v.channel_type='DEPARTMENT' and p_employee<>v.created_by and not exists(select 1 from employees e where e.id=p_employee and e.department_id=v.department_id) then raise exception 'department channels can include only department members' using errcode='42501'; end if;
+ if p_action in ('ADD','ROLE') and v.channel_type='PROJECT' and not exists(select 1 from projects p where p.id=v.project_id and p.org_id=current_org_id() and (p.manager_id=p_employee or exists(select 1 from project_members pm where pm.project_id=p.id and pm.employee_id=p_employee))) then raise exception 'project channels can include only project roster members' using errcode='42501'; end if;
+ if v.channel_type='DIRECT' then raise exception 'direct-message membership is immutable' using errcode='42501'; end if;
+ if p_role='OWNER' and (p_action<>'ADD' or p_employee<>v.created_by) then raise exception 'only the channel creator may hold owner role' using errcode='42501'; end if;
+ if p_employee=current_employee_id() and p_action='ROLE' then raise exception 'cannot change your own membership role' using errcode='42501'; end if;
+ select member_role into v_target_role from chat_channel_members where channel_id=p_channel and employee_id=p_employee;
+ if p_action='ADD' then
+  insert into chat_channel_members(channel_id,employee_id,member_role) values(p_channel,p_employee,p_role) on conflict(channel_id,employee_id) do nothing;
+ elsif p_action in ('REMOVE','LEAVE') then
+  if v_target_role='OWNER' then raise exception 'channel owner cannot be removed; archive the channel instead' using errcode='42501'; end if;
+  delete from chat_channel_members where channel_id=p_channel and employee_id=p_employee;
+ elsif p_action='ROLE' then
+  if v_target_role is null or v_target_role='OWNER' then raise exception 'membership unavailable or owner role is immutable' using errcode='42501'; end if;
+  update chat_channel_members set member_role=p_role where channel_id=p_channel and employee_id=p_employee;
+ end if;
+ insert into chat_moderation_events(org_id,actor_id,action,channel_id,target_employee_id,details)
+ values(current_org_id(),current_employee_id(),'MEMBER_'||p_action,p_channel,p_employee,jsonb_build_object('role',p_role));
+end $$;
+revoke all on function manage_chat_member(uuid,uuid,text,text) from public,anon;
+grant execute on function manage_chat_member(uuid,uuid,text,text) to authenticated;
+
+create or replace function moderate_chat_message(p_message uuid,p_action text,p_reason text default null) returns void
+language plpgsql security definer set search_path=public,pg_temp as $$
+declare v chat_messages;
+begin
+ if not has_perm('communication.moderate') then raise exception 'communication moderation permission required' using errcode='42501'; end if;
+ if p_action not in ('HIDE','RESTORE') then raise exception 'invalid moderation action' using errcode='22023'; end if;
+ select * into v from chat_messages where id=p_message and org_id=current_org_id() for update;
+ if v.id is null then raise exception 'message unavailable' using errcode='42501'; end if;
+ if p_action='HIDE' then update chat_messages set deleted_at=coalesce(deleted_at,now()) where id=p_message;
+ else update chat_messages set deleted_at=null where id=p_message; end if;
+ insert into chat_moderation_events(org_id,actor_id,action,channel_id,message_id,details)
+ values(current_org_id(),current_employee_id(),'MESSAGE_'||p_action,v.channel_id,p_message,jsonb_build_object('reason',left(coalesce(p_reason,''),1000)));
+ update chat_message_reports set status='ACTIONED',reviewed_by=current_employee_id(),reviewed_at=now(),resolution=left(coalesce(p_reason,'Message moderated'),2000)
+ where message_id=p_message and status in ('OPEN','REVIEWING') and p_action='HIDE';
+end $$;
+revoke all on function moderate_chat_message(uuid,text,text) from public,anon;
+grant execute on function moderate_chat_message(uuid,text,text) to authenticated;
+
+create or replace function review_chat_report(p_report uuid,p_status text,p_resolution text default null) returns void
+language plpgsql security definer set search_path=public,pg_temp as $$
+declare v chat_message_reports;
+begin
+ if not has_perm('communication.moderate') then raise exception 'communication moderation permission required' using errcode='42501'; end if;
+ if p_status not in ('REVIEWING','DISMISSED') then raise exception 'invalid report status' using errcode='22023'; end if;
+ select * into v from chat_message_reports where id=p_report and org_id=current_org_id() for update;
+ if v.id is null or v.status in ('ACTIONED','DISMISSED') then raise exception 'report unavailable or already resolved'; end if;
+ update chat_message_reports set status=p_status,reviewed_by=case when p_status='DISMISSED' then current_employee_id() else null end,
+  reviewed_at=case when p_status='DISMISSED' then now() else null end,resolution=left(coalesce(p_resolution,''),2000) where id=p_report;
+ insert into chat_moderation_events(org_id,actor_id,action,channel_id,message_id,details)
+ values(current_org_id(),current_employee_id(),'REPORT_'||p_status,v.channel_id,v.message_id,jsonb_build_object('report_id',p_report,'resolution',left(coalesce(p_resolution,''),1000)));
+end $$;
+revoke all on function review_chat_report(uuid,text,text) from public,anon;
+grant execute on function review_chat_report(uuid,text,text) to authenticated;
+
+-- Channel archive is a controlled action and does not permit changing channel type/org identity.
+create or replace function archive_chat_channel(p_channel uuid) returns void
+language plpgsql security definer set search_path=public,pg_temp as $$
+declare v chat_channels;
+begin
+ select * into v from chat_channels where id=p_channel and org_id=current_org_id() for update;
+ if v.id is null then raise exception 'channel unavailable'; end if;
+ if not (has_perm('communication.channel_manage') or (v.channel_type='PROJECT' and has_perm('projects.manage') and is_project_workspace_member(v.project_id)) or v.created_by=current_employee_id() or exists(select 1 from chat_channel_members m where m.channel_id=p_channel and m.employee_id=current_employee_id() and m.member_role='OWNER')) then
+  raise exception 'channel owner or channel management permission required' using errcode='42501'; end if;
+ update chat_channels set archived_at=coalesce(archived_at,now()) where id=p_channel;
+ insert into chat_moderation_events(org_id,actor_id,action,channel_id) values(current_org_id(),current_employee_id(),'CHANNEL_ARCHIVED',p_channel);
+end $$;
+revoke all on function archive_chat_channel(uuid) from public,anon;
+grant execute on function archive_chat_channel(uuid) to authenticated;
+
+-- Prevent direct table writes from bypassing message moderation and report workflow.
+drop policy if exists chat_messages_edit_own on chat_messages;
+create policy chat_messages_edit_own on chat_messages for update to authenticated using(
+ org_id=current_org_id() and has_perm('communication.send') and author_id=current_employee_id() and created_at>now()-interval '15 minutes' and is_chat_member(channel_id))
+ with check(org_id=current_org_id() and has_perm('communication.send') and author_id=current_employee_id() and created_at>now()-interval '15 minutes' and is_chat_member(channel_id));
+
+-- Ensure the app's permission catalogue and database seed stay aligned.
+
+-- Explicit grants: RLS still limits self-join/report reads to the policies above.
+grant insert on chat_channel_members to authenticated;
+grant select,insert on chat_message_reports to authenticated;
+grant select on chat_moderation_events to authenticated;
+
+create or replace function chat_report_org_guard() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+ if not exists(select 1 from chat_channels c join chat_messages m on m.channel_id=c.id
+   join employees e on e.id=new.reporter_id where c.id=new.channel_id and m.id=new.message_id and
+   c.org_id=new.org_id and m.org_id=new.org_id and e.org_id=new.org_id and m.author_id<>new.reporter_id) then
+  raise exception 'report entities must belong to the same organisation and cannot target self' using errcode='23514';
+ end if;
+ return new;
+end $$;
+create trigger chat_report_org_guard before insert or update on chat_message_reports for each row execute function chat_report_org_guard();
+
+-- Organisations created after this migration receive the new communication controls too.
+create or replace function seed_chat_permissions(p_org uuid) returns void
+language sql security definer set search_path=public,pg_temp as $$
+ insert into role_permissions(org_id,role,permission)
+ select p_org,r.role,p.permission from
+ (values ('ADMIN'::app_role),('HR_MANAGER'::app_role),('OPERATIONS_MANAGER'::app_role)) r(role)
+ cross join (values ('communication.channel_manage'),('communication.moderate')) p(permission)
+ on conflict do nothing;
+$$;
+revoke all on function seed_chat_permissions(uuid) from public,anon,authenticated;
+create or replace function organizations_seed_chat_permissions() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin perform seed_chat_permissions(new.id); return new; end $$;
+create trigger organizations_seed_chat_permissions after insert on organizations for each row execute function organizations_seed_chat_permissions();
+
+-- Moderation and channel administration are security-sensitive grants: Super Admin
+-- may delegate them, but lower-level role managers cannot pass them on.
+create or replace function is_sensitive_permission(p text) returns boolean language sql immutable as $$
+ select p like 'payroll.%' or p like 'salary.%' or p like 'finance.%'
+   or p in ('roles.manage','audit.view','settings.manage','communication.moderate','communication.channel_manage')
+$$;
+
+-- Moderators can inspect reported/private conversations without joining them; they remain read-only.
+drop policy if exists chat_channels_read on chat_channels;
+create policy chat_channels_read on chat_channels for select to authenticated using(
+ org_id=current_org_id() and (has_perm('communication.view') or has_perm('communication.moderate')) and archived_at is null and
+ (created_by=current_employee_id() or channel_type='PUBLIC' or
+  (channel_type='DEPARTMENT' and department_id=(select department_id from employees where id=current_employee_id())) or
+  is_chat_member(id) or has_perm('communication.channel_manage') or (has_perm('communication.moderate') and exists(select 1 from chat_message_reports r where r.channel_id=chat_channels.id and r.org_id=current_org_id() and r.status in ('OPEN','REVIEWING','ACTIONED')))));
+drop policy if exists chat_messages_read on chat_messages;
+create policy chat_messages_read on chat_messages for select to authenticated using(
+ org_id=current_org_id() and (has_perm('communication.view') or has_perm('communication.moderate')) and (is_chat_member(channel_id) or (has_perm('communication.moderate') and exists(select 1 from chat_message_reports r where r.channel_id=chat_messages.channel_id and r.org_id=current_org_id() and r.status in ('OPEN','REVIEWING','ACTIONED')))));
+drop policy if exists chat_attachments_read on chat_attachments;
+create policy chat_attachments_read on chat_attachments for select to authenticated using(
+ org_id=current_org_id() and (has_perm('communication.view') or has_perm('communication.moderate')) and (is_chat_member(channel_id) or (has_perm('communication.moderate') and exists(select 1 from chat_message_reports r where r.channel_id=chat_attachments.channel_id and r.org_id=current_org_id() and r.status in ('OPEN','REVIEWING','ACTIONED')))));
+drop policy if exists chat_files_read on storage.objects;
+create policy chat_files_read on storage.objects for select to authenticated using(
+ bucket_id='chat-files' and (has_perm('communication.view') or has_perm('communication.moderate')) and split_part(name,'/',1)=current_org_id()::text and
+ (is_chat_member(split_part(name,'/',2)::uuid) or (has_perm('communication.moderate') and exists(select 1 from chat_attachments a join chat_message_reports r on r.message_id=a.message_id where a.storage_path=name and r.org_id=current_org_id() and r.status in ('OPEN','REVIEWING','ACTIONED')))));
+-- Moderator read access to member roster is org-scoped and does not grant mutation rights.
+drop policy if exists chat_members_read on chat_channel_members;
+create policy chat_members_read on chat_channel_members for select to authenticated using(
+ exists(select 1 from chat_channels c where c.id=channel_id and c.org_id=current_org_id()) and
+ (has_perm('communication.view') or has_perm('communication.moderate')) and (employee_id=current_employee_id() or is_chat_member(channel_id) or has_perm('communication.channel_manage') or (has_perm('communication.moderate') and exists(select 1 from chat_message_reports r where r.channel_id=chat_channel_members.channel_id and r.org_id=current_org_id() and r.status in ('OPEN','REVIEWING','ACTIONED')))));
+-- Block 07: Executive reporting access. Financial details remain separately gated by finance.view.
+insert into role_permissions(org_id, role, permission)
+select o.id, r.role, 'executive.view'
+from organizations o
+cross join (values ('ADMIN'::app_role), ('OPERATIONS_MANAGER'::app_role)) r(role)
+on conflict do nothing;
+
+create or replace function seed_executive_permissions(p_org uuid)
+returns void language sql security definer set search_path=public,pg_temp as $$
+  insert into role_permissions(org_id, role, permission)
+  select p_org, r.role, 'executive.view'
+  from (values ('ADMIN'::app_role), ('OPERATIONS_MANAGER'::app_role)) r(role)
+  on conflict do nothing;
+$$;
+revoke all on function seed_executive_permissions(uuid) from public,anon,authenticated;
+
+create or replace function organizations_seed_executive_permissions()
+returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+  perform seed_executive_permissions(new.id);
+  return new;
+end $$;
+create trigger organizations_seed_executive_permissions
+  after insert on organizations for each row execute function organizations_seed_executive_permissions();
+
+-- Indexes support date-bounded executive reports without introducing denormalized financial copies.
+create index if not exists invoices_org_status_issue_idx on client_invoices(org_id, status, issue_date);
+create index if not exists invoice_payments_org_paid_idx on invoice_payments(org_id, paid_on);
+create index if not exists finance_expenses_org_paid_idx on finance_expenses(org_id, paid_on) where status='PAID';
+create index if not exists tasks_org_created_status_idx on tasks(org_id, created_at, status);
+create index if not exists projects_org_deadline_status_idx on projects(org_id, deadline, status);
+
+-- Reporting permission is not an implicit grant to payroll, finance, employee PII, or audit data.
+-- Block 08: workforce operations — teams, schedules, time allocation, quality, meetings and calendar.
+-- Attendance punches remain authoritative in attendance_events via record_attendance().
+
+create table org_teams (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  department_id uuid references departments(id) on delete set null, name text not null check(length(name) between 2 and 100),
+  description text, lead_employee_id uuid references employees(id) on delete set null,
+  is_active boolean not null default true, created_by uuid references employees(id), created_at timestamptz not null default now(),
+  unique(org_id, name), unique(id, org_id)
+);
+create table org_team_members (
+  org_id uuid not null references organizations(id) on delete cascade,
+  team_id uuid not null, employee_id uuid not null references employees(id) on delete cascade,
+  member_role text not null default 'MEMBER' check(member_role in ('LEAD','MANAGER','MEMBER')),
+  joined_at timestamptz not null default now(), primary key(team_id, employee_id),
+  foreign key(team_id, org_id) references org_teams(id, org_id) on delete cascade
+);
+create index org_team_members_employee_idx on org_team_members(org_id, employee_id);
+
+create table work_groups (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  name text not null check(length(name) between 2 and 100), description text,
+  group_type text not null default 'WORKING' check(group_type in ('WORKING','PROJECT','SOCIAL','COMMITTEE')),
+  is_private boolean not null default false, owner_id uuid not null references employees(id),
+  created_at timestamptz not null default now(), unique(org_id, name), unique(id, org_id)
+);
+create table work_group_members (
+  org_id uuid not null references organizations(id) on delete cascade, group_id uuid not null,
+  employee_id uuid not null references employees(id) on delete cascade,
+  member_role text not null default 'MEMBER' check(member_role in ('OWNER','MODERATOR','MEMBER')),
+  joined_at timestamptz not null default now(), primary key(group_id, employee_id),
+  foreign key(group_id, org_id) references work_groups(id, org_id) on delete cascade
+);
+
+create table schedule_assignments (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade, shift_id uuid not null references shifts(id) on delete restrict,
+  effective_from date not null, effective_to date, assigned_by uuid references employees(id), created_at timestamptz not null default now(),
+  check(effective_to is null or effective_to >= effective_from)
+);
+create index schedule_assignments_employee_date_idx on schedule_assignments(employee_id, effective_from, effective_to);
+
+create table task_time_entries (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  task_id uuid references tasks(id) on delete set null, project_id uuid references projects(id) on delete set null,
+  work_date date not null, started_at timestamptz, ended_at timestamptz,
+  minutes integer not null check(minutes between 1 and 1440), description text not null check(length(description) between 3 and 1000),
+  billable boolean not null default false, status request_status not null default 'PENDING',
+  approved_by uuid references employees(id), approved_at timestamptz, created_at timestamptz not null default now(),
+  check(task_id is not null), check(ended_at is null or started_at is null or ended_at > started_at),
+  check((status = 'APPROVED' and approved_by is not null and approved_at is not null) or status <> 'APPROVED')
+);
+create index task_time_entries_employee_date_idx on task_time_entries(org_id, employee_id, work_date desc);
+create index task_time_entries_status_idx on task_time_entries(org_id, status, work_date);
+
+create table quality_checklists (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  name text not null check(length(name) between 2 and 120), description text,
+  criteria jsonb not null default '[]'::jsonb check(jsonb_typeof(criteria)='array'),
+  is_active boolean not null default true, created_by uuid references employees(id), created_at timestamptz not null default now(), unique(org_id, name)
+);
+create table quality_assessments (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  task_id uuid references tasks(id) on delete set null, project_id uuid references projects(id) on delete set null,
+  employee_id uuid not null references employees(id) on delete cascade, reviewer_id uuid not null references employees(id),
+  checklist_id uuid references quality_checklists(id) on delete set null,
+  score numeric(5,2) not null check(score between 0 and 100), outcome text not null check(outcome in ('PASS','REWORK','FAIL')),
+  findings text, evidence jsonb not null default '[]'::jsonb check(jsonb_typeof(evidence)='array'), assessed_at timestamptz not null default now(),
+  check(task_id is not null or project_id is not null), check(employee_id <> reviewer_id)
+);
+create index quality_assessments_employee_idx on quality_assessments(org_id, employee_id, assessed_at desc);
+
+create table calendar_events (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  title text not null check(length(title) between 2 and 200), description text,
+  event_type text not null default 'MEETING' check(event_type in ('MEETING','FOCUS','DEADLINE','LEAVE','HOLIDAY','TRAINING','OTHER')),
+  visibility text not null default 'INVITEES' check(visibility in ('ORG','DEPARTMENT','TEAM','INVITEES','PRIVATE')),
+  starts_at timestamptz not null, ends_at timestamptz not null, all_day boolean not null default false,
+  location text, meeting_url text, department_id uuid references departments(id) on delete cascade,
+  team_id uuid references org_teams(id) on delete cascade, project_id uuid references projects(id) on delete set null,
+  organizer_id uuid not null references employees(id), recurrence_rule text,
+  status text not null default 'SCHEDULED' check(status in ('SCHEDULED','CANCELLED','COMPLETED')),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  check(ends_at > starts_at), check(meeting_url is null or meeting_url ~ '^https?://'),
+  check((visibility='DEPARTMENT')=(department_id is not null)), check((visibility='TEAM')=(team_id is not null))
+);
+create index calendar_events_org_start_idx on calendar_events(org_id, starts_at) where status <> 'CANCELLED';
+create table calendar_attendees (
+  event_id uuid not null references calendar_events(id) on delete cascade,
+  org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  response text not null default 'NEEDS_ACTION' check(response in ('NEEDS_ACTION','ACCEPTED','DECLINED','TENTATIVE')),
+  responded_at timestamptz, primary key(event_id, employee_id)
+);
+create index calendar_attendees_employee_idx on calendar_attendees(org_id, employee_id, event_id);
+
+create table meeting_notes (
+  id uuid primary key default gen_random_uuid(), org_id uuid not null references organizations(id) on delete cascade,
+  event_id uuid not null unique references calendar_events(id) on delete cascade,
+  agenda text, minutes text, decisions jsonb not null default '[]'::jsonb check(jsonb_typeof(decisions)='array'),
+  action_items jsonb not null default '[]'::jsonb check(jsonb_typeof(action_items)='array'),
+  updated_by uuid references employees(id), updated_at timestamptz not null default now()
+);
+
+-- Scope helpers. Team membership grants team visibility, never cross-organisation access.
+create or replace function can_view_team(p_team uuid) returns boolean language sql stable security definer set search_path=public,pg_temp as $$
+ select exists(select 1 from org_teams t where t.id=p_team and t.org_id=current_org_id() and
+   (has_perm('teams.view_all') or exists(select 1 from org_team_members m where m.team_id=t.id and m.employee_id=current_employee_id()) or t.lead_employee_id=current_employee_id()))
+$$;
+create or replace function can_manage_team(p_team uuid) returns boolean language sql stable security definer set search_path=public,pg_temp as $$
+ select exists(select 1 from org_teams t where t.id=p_team and t.org_id=current_org_id() and
+   (has_perm('teams.manage') or (has_perm('teams.manage_team') and (t.lead_employee_id=current_employee_id() or exists(select 1 from org_team_members m where m.team_id=t.id and m.employee_id=current_employee_id() and m.member_role in ('LEAD','MANAGER'))))))
+$$;
+
+-- Team and group tables.
+alter table org_teams enable row level security; alter table org_team_members enable row level security;
+alter table work_groups enable row level security; alter table work_group_members enable row level security;
+alter table schedule_assignments enable row level security; alter table task_time_entries enable row level security;
+alter table quality_checklists enable row level security; alter table quality_assessments enable row level security;
+alter table calendar_events enable row level security; alter table calendar_attendees enable row level security; alter table meeting_notes enable row level security;
+
+create policy teams_read on org_teams for select to authenticated using(org_id=current_org_id() and (has_perm('teams.view_all') or lead_employee_id=current_employee_id() or can_manage_team(id) or exists(select 1 from org_team_members m where m.team_id=id and m.employee_id=current_employee_id())));
+create policy teams_insert on org_teams for insert to authenticated with check(org_id=current_org_id() and has_perm('teams.manage'));
+create policy teams_update on org_teams for update to authenticated using(org_id=current_org_id() and (has_perm('teams.manage') or can_manage_team(id))) with check(org_id=current_org_id() and (has_perm('teams.manage') or can_manage_team(id)));
+create policy team_members_read on org_team_members for select to authenticated using(org_id=current_org_id() and (has_perm('teams.view_all') or employee_id=current_employee_id() or can_view_team(team_id) or can_manage_team(team_id)));
+create policy team_members_manage on org_team_members for all to authenticated using(org_id=current_org_id() and can_manage_team(team_id)) with check(org_id=current_org_id() and can_manage_team(team_id));
+
+create policy groups_read on work_groups for select to authenticated using(org_id=current_org_id() and (not is_private or owner_id=current_employee_id() or exists(select 1 from work_group_members m where m.group_id=id and m.employee_id=current_employee_id()) or has_perm('teams.view_all')));
+create policy groups_insert on work_groups for insert to authenticated with check(org_id=current_org_id() and owner_id=current_employee_id() and has_perm('teams.create_group'));
+create policy groups_update on work_groups for update to authenticated using(org_id=current_org_id() and (owner_id=current_employee_id() or has_perm('teams.manage'))) with check(org_id=current_org_id() and (owner_id=current_employee_id() or has_perm('teams.manage')));
+create policy group_members_read on work_group_members for select to authenticated using(org_id=current_org_id() and (employee_id=current_employee_id() or exists(select 1 from work_groups g where g.id=group_id and (not g.is_private or g.owner_id=current_employee_id() or has_perm('teams.view_all'))) or has_perm('teams.view_all')));
+create policy group_members_manage on work_group_members for all to authenticated using(org_id=current_org_id() and (has_perm('teams.manage') or exists(select 1 from work_groups g where g.id=group_id and g.owner_id=current_employee_id()))) with check(org_id=current_org_id() and (has_perm('teams.manage') or exists(select 1 from work_groups g where g.id=group_id and g.owner_id=current_employee_id())));
+
+create policy schedule_read on schedule_assignments for select to authenticated using(org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('attendance.view_all') or (has_perm('attendance.view_team') and is_in_my_team(employee_id))));
+create policy schedule_manage on schedule_assignments for all to authenticated using(org_id=current_org_id() and has_perm('attendance.manage')) with check(org_id=current_org_id() and has_perm('attendance.manage'));
+
+create policy time_entries_read on task_time_entries for select to authenticated using(org_id=current_org_id() and (employee_id=current_employee_id() or has_perm('time.view_all') or (has_perm('time.view_team') and is_in_my_team(employee_id))));
+create policy time_entries_insert on task_time_entries for insert to authenticated with check(org_id=current_org_id() and employee_id=current_employee_id() and status='PENDING' and approved_by is null and exists(select 1 from tasks t where t.id=task_id and t.assignee_id=current_employee_id()));
+create policy time_entries_update on task_time_entries for update to authenticated using(org_id=current_org_id() and employee_id=current_employee_id() and status='PENDING') with check(org_id=current_org_id() and employee_id=current_employee_id() and status='PENDING' and approved_by is null and exists(select 1 from tasks t where t.id=task_id and t.assignee_id=current_employee_id()));
+
+create policy quality_checklists_read on quality_checklists for select to authenticated using(org_id=current_org_id() and (has_perm('tasks.review') or is_active));
+create policy quality_checklists_manage on quality_checklists for all to authenticated using(org_id=current_org_id() and has_perm('quality.manage')) with check(org_id=current_org_id() and has_perm('quality.manage'));
+create policy quality_assessments_read on quality_assessments for select to authenticated using(org_id=current_org_id() and (employee_id=current_employee_id() or reviewer_id=current_employee_id() or has_perm('quality.view_all') or (has_perm('quality.view_team') and is_in_my_team(employee_id))));
+create policy quality_assessments_insert on quality_assessments for insert to authenticated with check(org_id=current_org_id() and reviewer_id=current_employee_id() and employee_id<>current_employee_id() and has_perm('quality.review'));
+
+create policy calendar_read on calendar_events for select to authenticated using(org_id=current_org_id() and (visibility='ORG' or organizer_id=current_employee_id() or exists(select 1 from calendar_attendees a where a.event_id=id and a.employee_id=current_employee_id()) or (visibility='DEPARTMENT' and department_id=(select department_id from employees where id=current_employee_id())) or (visibility='TEAM' and team_id is not null and can_view_team(team_id)) or (visibility='PRIVATE' and organizer_id=current_employee_id())));
+create policy calendar_insert on calendar_events for insert to authenticated with check(org_id=current_org_id() and organizer_id=current_employee_id() and has_perm('calendar.create'));
+create policy calendar_update on calendar_events for update to authenticated using(org_id=current_org_id() and (organizer_id=current_employee_id() or has_perm('calendar.manage'))) with check(org_id=current_org_id() and (organizer_id=current_employee_id() or has_perm('calendar.manage')));
+create policy attendees_read on calendar_attendees for select to authenticated using(org_id=current_org_id() and (employee_id=current_employee_id() or exists(select 1 from calendar_events e where e.id=event_id and (e.organizer_id=current_employee_id() or e.visibility='ORG' or has_perm('calendar.manage')))));
+create policy attendees_insert on calendar_attendees for insert to authenticated with check(org_id=current_org_id() and exists(select 1 from calendar_events e where e.id=event_id and e.org_id=current_org_id() and (e.organizer_id=current_employee_id() or has_perm('calendar.manage'))));
+create policy attendees_update_self on calendar_attendees for update to authenticated using(org_id=current_org_id() and employee_id=current_employee_id()) with check(org_id=current_org_id() and employee_id=current_employee_id());
+create policy meeting_notes_read on meeting_notes for select to authenticated using(org_id=current_org_id() and exists(select 1 from calendar_events e where e.id=event_id and (e.organizer_id=current_employee_id() or exists(select 1 from calendar_attendees a where a.event_id=e.id and a.employee_id=current_employee_id()) or has_perm('calendar.manage'))));
+create policy meeting_notes_write on meeting_notes for all to authenticated using(org_id=current_org_id() and (has_perm('calendar.manage') or exists(select 1 from calendar_events e where e.id=event_id and e.organizer_id=current_employee_id()))) with check(org_id=current_org_id() and (has_perm('calendar.manage') or exists(select 1 from calendar_events e where e.id=event_id and e.organizer_id=current_employee_id())));
+
+-- Approval RPC prevents self-approval and prevents changing approved/rejected records.
+create or replace function decide_task_time_entry(p_id uuid,p_approve boolean) returns task_time_entries
+language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_row task_time_entries; v_me uuid:=current_employee_id();
+begin
+ select * into v_row from task_time_entries where id=p_id and org_id=current_org_id() for update;
+ if v_row.id is null then raise exception 'time entry not found' using errcode='P0002'; end if;
+ if v_row.status<>'PENDING' then raise exception 'time entry already decided' using errcode='P0001'; end if;
+ if v_row.employee_id=v_me then raise exception 'cannot approve your own time' using errcode='42501'; end if;
+ if not (has_perm('time.approve_all') or (has_perm('time.approve_team') and is_in_my_team(v_row.employee_id))) then raise exception 'not authorized' using errcode='42501'; end if;
+ update task_time_entries set status=case when p_approve then 'APPROVED'::request_status else 'REJECTED'::request_status end,
+  approved_by=case when p_approve then v_me else null end, approved_at=case when p_approve then now() else null end
+ where id=p_id returning * into v_row;
+ perform _audit(v_row.org_id,case when p_approve then 'time.approved' else 'time.rejected' end,'task_time_entry',v_row.id::text,jsonb_build_object('employee_id',v_row.employee_id,'minutes',v_row.minutes));
+ return v_row;
+end $$;
+revoke all on function decide_task_time_entry(uuid,boolean) from public,anon;
+grant execute on function decide_task_time_entry(uuid,boolean) to authenticated;
+
+-- Permission grants for default roles and future organisations.
+insert into role_permissions(org_id,role,permission)
+select o.id,r.role,p.permission from organizations o
+cross join (values ('SUPER_ADMIN'::app_role),('ADMIN'::app_role),('OPERATIONS_MANAGER'::app_role),('DEPARTMENT_MANAGER'::app_role),('TEAM_LEAD'::app_role)) r(role)
+cross join (values ('teams.view_all'),('time.view_all'),('time.view_team'),('time.approve_all'),('time.approve_team'),('quality.view_all'),('quality.view_team'),('quality.review'),('calendar.manage')) p(permission)
+where (r.role in ('SUPER_ADMIN','ADMIN','OPERATIONS_MANAGER') or p.permission in ('time.view_team','time.approve_team','quality.view_team','quality.review'))
+on conflict do nothing;
+insert into role_permissions(org_id,role,permission)
+select o.id,r.role,p.permission from organizations o
+cross join (values ('SUPER_ADMIN'::app_role),('ADMIN'::app_role),('OPERATIONS_MANAGER'::app_role),('DEPARTMENT_MANAGER'::app_role),('TEAM_LEAD'::app_role)) r(role)
+cross join (values ('teams.manage'),('teams.manage_team'),('teams.create_group'),('calendar.create'),('quality.manage')) p(permission)
+where r.role in ('SUPER_ADMIN','ADMIN','OPERATIONS_MANAGER') or p.permission in ('teams.manage_team','teams.create_group','calendar.create')
+on conflict do nothing;
+
+create or replace function seed_workforce_collaboration_permissions(p_org uuid) returns void language sql security definer set search_path=public,pg_temp as $$
+ insert into role_permissions(org_id,role,permission)
+ select p_org,r.role,p.permission from
+ (values ('SUPER_ADMIN'::app_role),('ADMIN'::app_role),('OPERATIONS_MANAGER'::app_role),('DEPARTMENT_MANAGER'::app_role),('TEAM_LEAD'::app_role)) r(role)
+ cross join (values ('teams.view_all'),('time.view_all'),('time.view_team'),('time.approve_all'),('time.approve_team'),('quality.view_all'),('quality.view_team'),('quality.review'),('calendar.manage')) p(permission)
+ where r.role in ('SUPER_ADMIN','ADMIN','OPERATIONS_MANAGER') or p.permission in ('time.view_team','time.approve_team','quality.view_team','quality.review')
+ on conflict do nothing;
+ insert into role_permissions(org_id,role,permission)
+ select p_org,r.role,p.permission from (values ('SUPER_ADMIN'::app_role),('ADMIN'::app_role),('OPERATIONS_MANAGER'::app_role),('DEPARTMENT_MANAGER'::app_role),('TEAM_LEAD'::app_role)) r(role)
+ cross join (values ('teams.manage'),('teams.manage_team'),('teams.create_group'),('calendar.create'),('quality.manage')) p(permission)
+ where r.role in ('SUPER_ADMIN','ADMIN','OPERATIONS_MANAGER') or p.permission in ('teams.manage_team','teams.create_group','calendar.create')
+ on conflict do nothing;
+ insert into role_permissions(org_id,role,permission)
+ select p_org,r.role,'calendar.create' from unnest(enum_range(null::app_role)) as r(role)
+ on conflict do nothing;
+end $$;
+revoke all on function seed_workforce_collaboration_permissions(uuid) from public,anon,authenticated;
+create or replace function organizations_seed_workforce_collaboration_permissions() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin perform seed_workforce_collaboration_permissions(new.id); return new; end $$;
+create trigger organizations_seed_workforce_collaboration_permissions after insert on organizations for each row execute function organizations_seed_workforce_collaboration_permissions();
+
+-- Protect immutable ownership/org identity and log key business records.
+create or replace function workforce_org_guard() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+ if tg_op='UPDATE' and new.org_id is distinct from old.org_id then raise exception 'organisation cannot be changed' using errcode='42501'; end if;
+ if auth.uid() is not null and new.org_id<>current_org_id() then raise exception 'cross-organisation write denied' using errcode='42501'; end if;
+ return new;
+end $$;
+create trigger workforce_org_guard_teams before insert or update on org_teams for each row execute function workforce_org_guard();
+create trigger workforce_org_guard_groups before insert or update on work_groups for each row execute function workforce_org_guard();
+create trigger workforce_org_guard_calendar before insert or update on calendar_events for each row execute function workforce_org_guard();
+create trigger workforce_org_guard_time before insert or update on task_time_entries for each row execute function workforce_org_guard();
+create trigger workforce_org_guard_quality before insert or update on quality_assessments for each row execute function workforce_org_guard();
+
+-- Ensure the consolidated SQL remains a deterministic concatenation of source migrations.
+
+-- Break policy recursion through security-definer visibility helpers.
+create or replace function can_access_work_group(p_group uuid) returns boolean language sql stable security definer set search_path=public,pg_temp as $$
+ select exists(select 1 from work_groups g where g.id=p_group and g.org_id=current_org_id() and
+   (not g.is_private or g.owner_id=current_employee_id() or has_perm('teams.view_all') or has_perm('teams.manage') or exists(select 1 from work_group_members m where m.group_id=g.id and m.employee_id=current_employee_id())))
+$$;
+drop policy groups_read on work_groups;
+create policy groups_read on work_groups for select to authenticated using(org_id=current_org_id() and can_access_work_group(id));
+drop policy group_members_read on work_group_members;
+create policy group_members_read on work_group_members for select to authenticated using(org_id=current_org_id() and (employee_id=current_employee_id() or can_access_work_group(group_id)));
+
+create or replace function can_view_calendar_event(p_event uuid) returns boolean language sql stable security definer set search_path=public,pg_temp as $$
+ select exists(select 1 from calendar_events e where e.id=p_event and e.org_id=current_org_id() and
+   (has_perm('calendar.manage') or e.visibility='ORG' or e.organizer_id=current_employee_id() or
+    exists(select 1 from calendar_attendees a where a.event_id=e.id and a.employee_id=current_employee_id()) or
+    (e.visibility='DEPARTMENT' and e.department_id=(select department_id from employees where id=current_employee_id())) or
+    (e.visibility='TEAM' and e.team_id is not null and can_view_team(e.team_id))))
+$$;
+drop policy calendar_read on calendar_events;
+create policy calendar_read on calendar_events for select to authenticated using(org_id=current_org_id() and can_view_calendar_event(id));
+drop policy attendees_read on calendar_attendees;
+create policy attendees_read on calendar_attendees for select to authenticated using(org_id=current_org_id() and (employee_id=current_employee_id() or can_view_calendar_event(event_id) or has_perm('calendar.manage')));
+drop policy meeting_notes_read on meeting_notes;
+create policy meeting_notes_read on meeting_notes for select to authenticated using(org_id=current_org_id() and can_view_calendar_event(event_id));
+drop policy quality_assessments_insert on quality_assessments;
+create policy quality_assessments_insert on quality_assessments for insert to authenticated with check(org_id=current_org_id() and reviewer_id=current_employee_id() and employee_id<>current_employee_id() and (has_perm('quality.review') or has_perm('tasks.review')));
+
+-- Enforce tenant consistency for every relationship that is not covered by a composite foreign key.
+create or replace function workforce_relationship_guard() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_org uuid;
+begin
+ if tg_op='UPDATE' and new.org_id is distinct from old.org_id then raise exception 'organisation cannot be changed' using errcode='42501'; end if;
+ if auth.uid() is not null and new.org_id<>current_org_id() then raise exception 'cross-organisation write denied' using errcode='42501'; end if;
+ if tg_table_name='org_teams' then
+   if new.created_by is not null then select org_id into v_org from employees where id=new.created_by; if v_org is distinct from new.org_id then raise exception 'team creator must belong to this organisation'; end if; end if;
+   if new.lead_employee_id is not null then select org_id into v_org from employees where id=new.lead_employee_id; if v_org is distinct from new.org_id then raise exception 'team lead must belong to this organisation'; end if; end if;
+   if new.department_id is not null then select org_id into v_org from departments where id=new.department_id; if v_org is distinct from new.org_id then raise exception 'team department must belong to this organisation'; end if; end if;
+ elsif tg_table_name='org_team_members' then
+   select org_id into v_org from employees where id=new.employee_id; if v_org is distinct from new.org_id then raise exception 'team member must belong to this organisation'; end if;
+ elsif tg_table_name='work_groups' then
+   if tg_op='UPDATE' and new.owner_id is distinct from old.owner_id then raise exception 'group ownership transfer is not available; create a new group or contact an administrator' using errcode='42501'; end if;
+   select org_id into v_org from employees where id=new.owner_id; if v_org is distinct from new.org_id then raise exception 'group owner must belong to this organisation'; end if;
+ elsif tg_table_name='work_group_members' then
+   select org_id into v_org from employees where id=new.employee_id; if v_org is distinct from new.org_id then raise exception 'group member must belong to this organisation'; end if;
+ elsif tg_table_name='schedule_assignments' then
+   select org_id into v_org from employees where id=new.employee_id; if v_org is distinct from new.org_id then raise exception 'schedule employee must belong to this organisation'; end if;
+   select org_id into v_org from shifts where id=new.shift_id; if v_org is distinct from new.org_id then raise exception 'shift must belong to this organisation'; end if;
+   if new.assigned_by is not null then select org_id into v_org from employees where id=new.assigned_by; if v_org is distinct from new.org_id then raise exception 'schedule assigner must belong to this organisation'; end if; end if;
+   perform pg_advisory_xact_lock(hashtext(new.employee_id::text));
+   if exists(select 1 from schedule_assignments a where a.employee_id=new.employee_id and a.id<>coalesce(new.id,'00000000-0000-0000-0000-000000000000'::uuid) and daterange(a.effective_from,coalesce(a.effective_to,'infinity'::date),'[]') && daterange(new.effective_from,coalesce(new.effective_to,'infinity'::date),'[]')) then raise exception 'schedule dates overlap an existing assignment' using errcode='23P01'; end if;
+ elsif tg_table_name='task_time_entries' then
+   select org_id into v_org from employees where id=new.employee_id; if v_org is distinct from new.org_id then raise exception 'time owner must belong to this organisation'; end if;
+   if new.task_id is not null then select org_id into v_org from tasks where id=new.task_id; if v_org is distinct from new.org_id then raise exception 'task must belong to this organisation'; end if; end if;
+   if new.project_id is not null then select org_id into v_org from projects where id=new.project_id; if v_org is distinct from new.org_id then raise exception 'project must belong to this organisation'; end if; if new.task_id is not null and not exists(select 1 from tasks where id=new.task_id and project_id=new.project_id) then raise exception 'selected project must match the task project'; end if; end if;
+   if new.approved_by is not null then select org_id into v_org from employees where id=new.approved_by; if v_org is distinct from new.org_id then raise exception 'approver must belong to this organisation'; end if; end if;
+ elsif tg_table_name='quality_checklists' then
+   if new.created_by is not null then select org_id into v_org from employees where id=new.created_by; if v_org is distinct from new.org_id then raise exception 'checklist creator must belong to this organisation'; end if; end if;
+ elsif tg_table_name='quality_assessments' then
+   select org_id into v_org from employees where id=new.employee_id; if v_org is distinct from new.org_id then raise exception 'assessed employee must belong to this organisation'; end if;
+   select org_id into v_org from employees where id=new.reviewer_id; if v_org is distinct from new.org_id then raise exception 'reviewer must belong to this organisation'; end if;
+   if new.task_id is not null then select org_id into v_org from tasks where id=new.task_id; if v_org is distinct from new.org_id then raise exception 'task must belong to this organisation'; end if; end if;
+   if new.project_id is not null then select org_id into v_org from projects where id=new.project_id; if v_org is distinct from new.org_id then raise exception 'project must belong to this organisation'; end if; if new.task_id is not null and not exists(select 1 from tasks where id=new.task_id and project_id=new.project_id) then raise exception 'selected project must match the task project'; end if; end if;
+   if new.checklist_id is not null then select org_id into v_org from quality_checklists where id=new.checklist_id; if v_org is distinct from new.org_id then raise exception 'quality checklist must belong to this organisation'; end if; end if;
+ elsif tg_table_name='calendar_events' then
+   select org_id into v_org from employees where id=new.organizer_id; if v_org is distinct from new.org_id then raise exception 'organizer must belong to this organisation'; end if;
+   if new.department_id is not null then select org_id into v_org from departments where id=new.department_id; if v_org is distinct from new.org_id then raise exception 'department must belong to this organisation'; end if; end if;
+   if new.team_id is not null then select org_id into v_org from org_teams where id=new.team_id; if v_org is distinct from new.org_id then raise exception 'team must belong to this organisation'; end if; end if;
+   if new.project_id is not null then select org_id into v_org from projects where id=new.project_id; if v_org is distinct from new.org_id then raise exception 'project must belong to this organisation'; end if; end if;
+ elsif tg_table_name='calendar_attendees' then
+   if tg_op='UPDATE' and (new.event_id is distinct from old.event_id or new.employee_id is distinct from old.employee_id) then raise exception 'invitation identity cannot be changed' using errcode='42501'; end if;
+   select org_id into v_org from employees where id=new.employee_id; if v_org is distinct from new.org_id then raise exception 'attendee must belong to this organisation'; end if;
+   select org_id into v_org from calendar_events where id=new.event_id; if v_org is distinct from new.org_id then raise exception 'event must belong to this organisation'; end if;
+ elsif tg_table_name='meeting_notes' then
+   select org_id into v_org from calendar_events where id=new.event_id; if v_org is distinct from new.org_id then raise exception 'meeting must belong to this organisation'; end if;
+   if new.updated_by is not null then select org_id into v_org from employees where id=new.updated_by; if v_org is distinct from new.org_id then raise exception 'meeting editor must belong to this organisation'; end if; end if;
+ end if;
+ return new;
+end $$;
+create trigger workforce_relationship_guard_teams before insert or update on org_teams for each row execute function workforce_relationship_guard();
+create trigger workforce_relationship_guard_team_members before insert or update on org_team_members for each row execute function workforce_relationship_guard();
+create trigger workforce_relationship_guard_groups before insert or update on work_groups for each row execute function workforce_relationship_guard();
+create trigger workforce_relationship_guard_group_members before insert or update on work_group_members for each row execute function workforce_relationship_guard();
+create trigger workforce_relationship_guard_schedules before insert or update on schedule_assignments for each row execute function workforce_relationship_guard();
+create trigger workforce_relationship_guard_time before insert or update on task_time_entries for each row execute function workforce_relationship_guard();
+create trigger workforce_relationship_guard_quality_checklists before insert or update on quality_checklists for each row execute function workforce_relationship_guard();
+create trigger workforce_relationship_guard_quality before insert or update on quality_assessments for each row execute function workforce_relationship_guard();
+create trigger workforce_relationship_guard_events before insert or update on calendar_events for each row execute function workforce_relationship_guard();
+create trigger workforce_relationship_guard_attendees before insert or update on calendar_attendees for each row execute function workforce_relationship_guard();
+create trigger workforce_relationship_guard_notes before insert or update on meeting_notes for each row execute function workforce_relationship_guard();
+
+-- Every employee can schedule personal/invitee events; organisation-wide calendar administration stays gated.
+insert into role_permissions(org_id,role,permission)
+select o.id,r.role,'calendar.create' from organizations o cross join unnest(enum_range(null::app_role)) as r(role) on conflict do nothing;
+
+-- Rebuild aggregate migration in source order.
+
+create or replace function notify_calendar_invitation() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_title text; v_start timestamptz; v_organizer uuid;
+begin
+ select title,starts_at,organizer_id into v_title,v_start,v_organizer from calendar_events where id=new.event_id;
+ if new.employee_id<>v_organizer and new.response='NEEDS_ACTION' then
+   insert into notifications(org_id,recipient_id,category,title,body,link,dedupe_key)
+   values(new.org_id,new.employee_id,'MEETINGS','Meeting invitation: '||coalesce(v_title,'Meeting'),'You have been invited to a meeting.','/calendar','calendar-invite:'||new.event_id::text||':'||new.employee_id::text)
+   on conflict(recipient_id,dedupe_key) do nothing;
+ end if;
+ return new;
+end $$;
+create trigger calendar_invitation_notify after insert on calendar_attendees for each row execute function notify_calendar_invitation();
+
+-- Keep database delegation rules aligned with the application permission catalogue.
+create or replace function is_sensitive_permission(p text) returns boolean language sql immutable as $$
+ select p like 'payroll.%' or p like 'salary.%' or p like 'finance.%'
+   or p in ('roles.manage','audit.view','settings.manage','communication.moderate','communication.channel_manage',
+            'teams.manage','time.approve_all','quality.manage','calendar.manage')
+$$;
+
+create or replace function join_public_work_group(p_group uuid) returns void language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_group work_groups;
+begin
+ select * into v_group from work_groups where id=p_group and org_id=current_org_id() for update;
+ if v_group.id is null then raise exception 'group not found' using errcode='P0002'; end if;
+ if v_group.is_private then raise exception 'private groups require an invitation' using errcode='42501'; end if;
+ insert into work_group_members(org_id,group_id,employee_id,member_role) values(v_group.org_id,v_group.id,current_employee_id(),'MEMBER') on conflict(group_id,employee_id) do nothing;
+end $$;
+create or replace function leave_work_group(p_group uuid) returns void language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+ delete from work_group_members m using work_groups g where m.group_id=g.id and m.org_id=current_org_id() and m.group_id=p_group and m.employee_id=current_employee_id() and m.member_role<>'OWNER' and g.is_private=false;
+ if not found then raise exception 'you cannot leave this group or it is private' using errcode='42501'; end if;
+end $$;
+revoke all on function join_public_work_group(uuid) from public,anon;
+revoke all on function leave_work_group(uuid) from public,anon;
+grant execute on function join_public_work_group(uuid),leave_work_group(uuid) to authenticated;
+
+revoke all on function can_view_team(uuid),can_manage_team(uuid),can_access_work_group(uuid),can_view_calendar_event(uuid) from public,anon;
+grant execute on function can_view_team(uuid),can_manage_team(uuid),can_access_work_group(uuid),can_view_calendar_event(uuid) to authenticated;
+revoke all on function workforce_org_guard(),workforce_relationship_guard(),organizations_seed_workforce_collaboration_permissions(),notify_calendar_invitation() from public,anon,authenticated;
+
+create or replace function protect_team_and_group_owners() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+begin
+ if tg_table_name='org_team_members' then
+   if old.member_role='LEAD' or exists(select 1 from org_teams t where t.id=old.team_id and t.lead_employee_id=old.employee_id) then
+     raise exception 'transfer team leadership before removing the team lead' using errcode='42501';
+   end if;
+ elsif tg_table_name='work_group_members' then
+   if old.member_role='OWNER' or exists(select 1 from work_groups g where g.id=old.group_id and g.owner_id=old.employee_id) then
+     raise exception 'group ownership cannot be removed from the owner' using errcode='42501';
+   end if;
+ end if;
+ return old;
+end $$;
+create trigger protect_team_lead_membership before delete on org_team_members for each row execute function protect_team_and_group_owners();
+create trigger protect_group_owner_membership before delete on work_group_members for each row execute function protect_team_and_group_owners();
+revoke all on function protect_team_and_group_owners() from public,anon,authenticated;
+
+create or replace function transfer_org_team_lead(p_team uuid,p_employee uuid) returns void language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_team org_teams; v_me uuid:=current_employee_id(); v_org uuid;
+begin
+ select * into v_team from org_teams where id=p_team and org_id=current_org_id() for update;
+ if v_team.id is null then raise exception 'team not found' using errcode='P0002'; end if;
+ if not can_manage_team(p_team) then raise exception 'team management permission required' using errcode='42501'; end if;
+ select org_id into v_org from employees where id=p_employee and status<>'EXITED';
+ if v_org is distinct from current_org_id() then raise exception 'new team lead must be an active employee in this organisation' using errcode='23514'; end if;
+ if v_team.lead_employee_id is not null and v_team.lead_employee_id<>p_employee then
+   update org_team_members set member_role='MEMBER' where team_id=p_team and employee_id=v_team.lead_employee_id;
+ end if;
+ update org_teams set lead_employee_id=p_employee where id=p_team;
+ insert into org_team_members(org_id,team_id,employee_id,member_role) values(current_org_id(),p_team,p_employee,'LEAD')
+ on conflict(team_id,employee_id) do update set member_role='LEAD';
+ perform _audit(current_org_id(),'team.lead.transferred','org_team',p_team::text,jsonb_build_object('from',v_team.lead_employee_id,'to',p_employee));
+end $$;
+revoke all on function transfer_org_team_lead(uuid,uuid) from public,anon;
+grant execute on function transfer_org_team_lead(uuid,uuid) to authenticated;
+
+create or replace function notify_calendar_response() returns trigger language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_title text; v_organizer uuid; v_name text;
+begin
+ if new.response is distinct from old.response then
+   select title,organizer_id into v_title,v_organizer from calendar_events where id=new.event_id;
+   select full_name into v_name from employees where id=new.employee_id;
+   if v_organizer is not null and v_organizer<>new.employee_id then
+     insert into notifications(org_id,recipient_id,category,title,body,link,dedupe_key)
+     values(new.org_id,v_organizer,'MEETINGS','Meeting response: '||coalesce(v_name,'An attendee'),coalesce(v_name,'An attendee')||' responded '||lower(new.response)||' to '||coalesce(v_title,'your meeting'),'/meetings','calendar-response:'||new.event_id::text||':'||new.employee_id::text||':'||new.response)
+     on conflict(recipient_id,dedupe_key) do nothing;
+   end if;
+ end if;
+ return new;
+end $$;
+create trigger calendar_response_notify after update of response on calendar_attendees for each row execute function notify_calendar_response();
+revoke all on function notify_calendar_response() from public,anon,authenticated;
+
+-- Atomic event + attendee creation: an event is never left half-created when an invite fails.
+create or replace function create_calendar_event(
+ p_title text,p_description text,p_event_type text,p_visibility text,p_starts_at timestamptz,p_ends_at timestamptz,
+ p_location text default null,p_meeting_url text default null,p_department uuid default null,p_team uuid default null,p_attendees uuid[] default '{}'
+) returns uuid language plpgsql security definer set search_path=public,pg_temp as $$
+declare v_org uuid:=current_org_id(); v_me uuid:=current_employee_id(); v_event uuid;
+begin
+ if v_me is null or not (has_perm('calendar.create') or has_perm('calendar.manage')) then raise exception 'calendar creation permission required' using errcode='42501'; end if;
+ if length(trim(coalesce(p_title,'')))<2 or length(p_title)>200 or length(coalesce(p_description,''))>3000 or length(coalesce(p_location,''))>200 or coalesce(array_length(p_attendees,1),0)>100 or p_ends_at<=p_starts_at then raise exception 'invalid calendar event details'; end if;
+ if p_visibility='DEPARTMENT' and p_department is null then raise exception 'department required for department event'; end if;
+ if p_visibility='TEAM' and p_team is null then raise exception 'team required for team event'; end if;
+ if exists(select 1 from unnest(coalesce(p_attendees,'{}'::uuid[])) a(id) left join employees e on e.id=a.id and e.org_id=v_org and e.status<>'EXITED' where e.id is null) then raise exception 'all invitees must be active employees in this organisation' using errcode='23514'; end if;
+ insert into calendar_events(org_id,title,description,event_type,visibility,starts_at,ends_at,location,meeting_url,department_id,team_id,organizer_id)
+ values(v_org,trim(p_title),nullif(p_description,''),p_event_type,p_visibility,p_starts_at,p_ends_at,nullif(p_location,''),nullif(p_meeting_url,''),p_department,p_team,v_me)
+ returning id into v_event;
+ insert into calendar_attendees(event_id,org_id,employee_id,response)
+ select v_event,v_org,a.employee_id,case when a.employee_id=v_me then 'ACCEPTED' else 'NEEDS_ACTION' end
+ from (select distinct unnest(array_append(coalesce(p_attendees,'{}'::uuid[]),v_me)) as employee_id) a;
+ perform _audit(v_org,'calendar.event.created','calendar_event',v_event::text,jsonb_build_object('event_type',p_event_type,'visibility',p_visibility,'attendee_count',coalesce(array_length(p_attendees,1),0)));
+ return v_event;
+end $$;
+revoke all on function create_calendar_event(text,text,text,text,timestamptz,timestamptz,text,text,uuid,uuid,uuid[]) from public,anon;
+grant execute on function create_calendar_event(text,text,text,text,timestamptz,timestamptz,text,text,uuid,uuid,uuid[]) to authenticated;

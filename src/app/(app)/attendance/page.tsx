@@ -37,6 +37,8 @@ export default async function AttendancePage({ searchParams }: { searchParams: P
         <span className="btn pointer-events-none border border-line">{new Date(`${month}T12:00:00Z`).toLocaleString("en-IN", { month: "long", year: "numeric" })}</span>
         <Link className="btn-ghost" href={q(shiftMonth(month, 1))}>Next →</Link>
         <a className="btn-ghost" href={`/api/reports/attendance?month=${month}&employee=${employeeId}`}>Download CSV</a>
+        <Link className="btn-ghost" href="/time">Log work time →</Link>
+        <Link className="btn-ghost" href="/calendar">Calendar</Link>
       </PageHeader>
       <Flash sp={sp} />
 

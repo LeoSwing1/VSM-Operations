@@ -2,7 +2,7 @@ import { requirePerm } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
 import { Card, Empty, Field, Flash, PageHeader, TableWrap } from "@/components/ui";
 import { fmtDate, localDate } from "@/lib/engines/time";
-import { addHoliday, removeHoliday, saveShift } from "./actions";
+import { addHoliday, removeHoliday, saveShift, assignShift } from "./actions";
 
 export const metadata = { title: "Shifts & holidays" };
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -12,10 +12,12 @@ export default async function AttendanceSettings({ searchParams }: { searchParam
   const ctx = await requirePerm("attendance.manage");
   const sb = await supabaseServer();
   const year = /^\d{4}$/.test(sp.year ?? "") ? sp.year! : localDate(new Date(), ctx.timezone).slice(0, 4);
-  const [{ data: shifts }, { data: holidays }, { data: emps }] = await Promise.all([
+  const [{ data: shifts }, { data: holidays }, { data: emps }, { data: schedulePeople }, { data: assignments }] = await Promise.all([
     sb.from("shifts").select("*").order("name"),
     sb.from("holidays").select("id, holiday_date, name").gte("holiday_date", `${year}-01-01`).lte("holiday_date", `${year}-12-31`).order("holiday_date"),
     sb.from("employees").select("shift_id").neq("status", "EXITED"),
+    sb.from("employee_directory").select("id,full_name").order("full_name"),
+    sb.from("schedule_assignments").select("id,employee_id,shift_id,effective_from,effective_to").order("effective_from", { ascending: false }).limit(80),
   ]);
   const on = (id: string) => (emps ?? []).filter((e) => e.shift_id === id).length;
   const unassigned = (emps ?? []).filter((e) => !e.shift_id).length;
@@ -51,6 +53,20 @@ export default async function AttendanceSettings({ searchParams }: { searchParam
           </Card>))}
       </div>
       <p className="mt-3 text-xs text-muted">Below the half-day hours counts as absent; between half and full is a half day (0.5 loss of pay). Changes apply to attendance reports and payroll from the next calculation.</p>
+      <div className="mt-8 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
+        <Card title="Assign effective-dated shift">
+          <form action={assignShift} className="grid gap-3">
+            <Field label="Employee"><select name="employee_id" className="input" required>{(schedulePeople ?? []).map((e) => <option key={e.id} value={e.id}>{e.full_name}</option>)}</select></Field>
+            <Field label="Shift"><select name="shift_id" className="input" required>{(shifts ?? []).map((s) => <option key={s.id} value={s.id}>{s.name} · {String(s.start_time).slice(0,5)}–{String(s.end_time).slice(0,5)}</option>)}</select></Field>
+            <Field label="Effective from"><input name="effective_from" type="date" className="input" required /></Field>
+            <Field label="Effective to (optional)"><input name="effective_to" type="date" className="input" /></Field>
+            <button className="btn-primary">Assign schedule</button>
+          </form>
+        </Card>
+        <Card title="Recent shift assignments">
+          {!assignments?.length ? <Empty title="No effective-dated assignments" /> : <TableWrap><table className="table"><thead><tr><th>Employee</th><th>Shift</th><th>From</th><th>To</th></tr></thead><tbody>{assignments.map((a: any) => <tr key={a.id}><td>{schedulePeople?.find((e) => e.id === a.employee_id)?.full_name ?? "—"}</td><td>{shifts?.find((s) => s.id === a.shift_id)?.name ?? "—"}</td><td>{a.effective_from}</td><td>{a.effective_to ?? "Ongoing"}</td></tr>)}</tbody></table></TableWrap>}
+        </Card>
+      </div>
 
       <div className="mb-3 mt-10 flex flex-wrap items-center justify-between gap-2">
         <h2 className="eyebrow">Holidays {year}</h2>

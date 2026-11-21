@@ -89,6 +89,8 @@ export function summariseDayEvents(events: AttendanceEvent[], nowIso?: string) {
 export function summariseAttendance(input: {
   events: AttendanceEvent[];
   shift: ShiftPolicy;
+  /** Optional effective-dated shift override for each local work date. */
+  shiftByDate?: Record<string, ShiftPolicy>;
   start: string; end: string;           // inclusive local dates
   holidays: string[];
   leave: LeaveDay[];
@@ -106,11 +108,11 @@ export function summariseAttendance(input: {
   }
   const holidays = new Set(input.holidays);
   const leave = new Map(input.leave.map((l) => [l.date, l]));
-  const shiftStart = timeToMinutes(input.shift.start_time);
-  const shiftEnd = timeToMinutes(input.shift.end_time);
-
   const days: DaySummary[] = eachDate(input.start, input.end).map((date) => {
     const ev = byDay.get(date) ?? [];
+    const dayShift = input.shiftByDate?.[date] ?? input.shift;
+    const shiftStart = timeToMinutes(dayShift.start_time);
+    const shiftEnd = timeToMinutes(dayShift.end_time);
     const isToday = date === input.today;
     const s = summariseDayEvents(ev, isToday ? input.nowIso : undefined);
     const base: DaySummary = {
@@ -121,12 +123,12 @@ export function summariseAttendance(input: {
     };
     if (date < input.joiningDate || (input.exitDate && date > input.exitDate)) return { ...base, status: "NOT_EMPLOYED" };
     if (holidays.has(date)) return { ...base, status: "HOLIDAY" };
-    if (input.shift.weekly_offs.includes(weekday(date))) return { ...base, status: "WEEKLY_OFF" };
+    if (dayShift.weekly_offs.includes(weekday(date))) return { ...base, status: "WEEKLY_OFF" };
     if (date > input.today) return { ...base, status: "UPCOMING", isWorkingDay: false };
 
     base.isWorkingDay = true;
     if (s.firstIn) {
-      const late = localMinutes(s.firstIn, tz) - (shiftStart + input.shift.grace_minutes);
+      const late = localMinutes(s.firstIn, tz) - (shiftStart + dayShift.grace_minutes);
       base.lateMinutes = Math.max(0, late);
       if (s.lastOut && !s.open) base.earlyDepartureMinutes = Math.max(0, shiftEnd - localMinutes(s.lastOut, tz));
     }
@@ -137,13 +139,13 @@ export function summariseAttendance(input: {
     }
     if (isToday && s.open) return { ...base, status: "PRESENT" };   // in progress, judged at end of day
 
-    const fullDay = s.workedMinutes >= input.shift.full_day_minutes;
-    const halfDay = !fullDay && s.workedMinutes >= input.shift.half_day_minutes;
+    const fullDay = s.workedMinutes >= dayShift.full_day_minutes;
+    const halfDay = !fullDay && s.workedMinutes >= dayShift.half_day_minutes;
 
     if (l && !l.half) return { ...base, status: "LEAVE", leavePaid: l.paid, lop: l.paid ? 0 : 1 };
     if (l && l.half) {
       // half leave + at least half day worked = complete day
-      const workedPart = s.workedMinutes >= input.shift.half_day_minutes ? 0.5 : 0;
+      const workedPart = s.workedMinutes >= dayShift.half_day_minutes ? 0.5 : 0;
       return { ...base, status: "HALF_LEAVE", leavePaid: l.paid, lop: (l.paid ? 0 : 0.5) + (0.5 - workedPart) };
     }
     if (fullDay) return { ...base, status: "PRESENT" };
@@ -158,7 +160,7 @@ export function summariseAttendance(input: {
   const arrived = working.filter((d) => d.firstIn);
   const late = arrived.filter((d) => d.lateMinutes > 0).length;
   const leaveDays = working.reduce((n, d) => n + (d.status === "LEAVE" ? 1 : d.status === "HALF_LEAVE" ? 0.5 : 0), 0);
-  const presentDays = present + half * 0.5 + working.filter((d) => d.status === "HALF_LEAVE" && d.workedMinutes >= input.shift.half_day_minutes).length * 0.5
+  const presentDays = present + half * 0.5 + working.filter((d) => d.status === "HALF_LEAVE" && d.workedMinutes >= (input.shiftByDate?.[d.date] ?? input.shift).half_day_minutes).length * 0.5
     + working.filter((d) => d.status === "INCOMPLETE").length * 0.5;
   const expected = working.length - leaveDays;
 

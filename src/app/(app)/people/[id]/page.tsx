@@ -7,13 +7,14 @@ import { computeForEmployee } from "@/lib/data/performance";
 import { Badge, Card, Empty, Flash, Meter, PageHeader, Stat, TableWrap, Tabs, inr } from "@/components/ui";
 import { fmtDate, fmtDateTime, localDate, monthBounds } from "@/lib/engines/time";
 import { EmployeeFields } from "../employee-form";
-import { resendInvite, updateEmployee } from "../actions";
+import { resendInvite, updateEmployee, toggleOnboardingItem, addOnboardingItem, removeOnboardingItem } from "../actions";
 import { assignableRoles } from "@/lib/data/roles";
+import { uploadEmployeeDocument, deleteEmployeeDocument, createProbationReview, updateProbationReview, addExitClearanceItem, toggleExitClearanceItem, issueEmployeeLetter, revokeEmployeeLetter } from "../actions";
 
 export const metadata = { title: "Employee 360" };
 
 const TABS = [
-  { key: "overview", label: "Overview" }, { key: "attendance", label: "Attendance" }, { key: "tasks", label: "Tasks" },
+  { key: "overview", label: "Overview" }, { key: "onboarding", label: "Onboarding" }, { key: "documents", label: "Documents" }, { key: "letters", label: "Letters" }, { key: "probation", label: "Probation" }, { key: "exit", label: "Exit clearance" }, { key: "attendance", label: "Attendance" }, { key: "tasks", label: "Tasks" },
   { key: "updates", label: "Daily updates" }, { key: "leave", label: "Leave" }, { key: "performance", label: "Performance" },
   { key: "salary", label: "Salary" }, { key: "activity", label: "Activity" },
 ];
@@ -30,7 +31,7 @@ export default async function Employee360({ params, searchParams }: { params: Pr
   const self = id === ctx.employee_id;
   const manage = can(ctx, "people.manage");
   const salaryAllowed = self || can(ctx, "payroll.view_all");
-  const tabs = [...TABS.filter((t) => t.key !== "salary" || salaryAllowed).filter((t) => t.key !== "activity" || can(ctx, "audit.view")),
+  const tabs = [...TABS.filter((t) => t.key !== "salary" || salaryAllowed).filter((t) => t.key !== "activity" || can(ctx, "audit.view")).filter((t) => t.key !== "onboarding" || self || manage || can(ctx, "people.view_team")),
     ...(manage ? [{ key: "edit", label: "Edit" }] : [])];
   const tab = tabs.some((t) => t.key === sp.tab) ? sp.tab! : "overview";
   const tz = ctx.timezone;
@@ -45,6 +46,11 @@ export default async function Employee360({ params, searchParams }: { params: Pr
       <Tabs tabs={tabs} active={tab} base={`/people/${id}`} />
 
       {tab === "overview" && <Overview e={e} manage={manage} />}
+      {tab === "onboarding" && <OnboardingTab sb={sb} id={id} manage={manage} />}
+      {tab === "documents" && <DocumentsTab sb={sb} id={id} manage={manage} />}
+      {tab === "letters" && <LettersTab sb={sb} id={id} manage={manage} />}
+      {tab === "probation" && <ProbationTab sb={sb} id={id} manage={manage} />}
+      {tab === "exit" && <ExitTab sb={sb} id={id} manage={manage} />}
       {tab === "attendance" && <AttendanceTab sb={sb} id={id} start={start} end={end} tz={tz} />}
       {tab === "tasks" && <TasksTab sb={sb} id={id} tz={tz} />}
       {tab === "updates" && <UpdatesTab sb={sb} id={id} />}
@@ -83,6 +89,88 @@ function Overview({ e, manage }: { e: any; manage: boolean }) {
       </Card>
     </div>
   );
+}
+
+async function OnboardingTab({ sb, id, manage }: { sb: SB; id: string; manage: boolean }) {
+  const { data, error } = await sb.from("onboarding_checklist_items").select("id,title,category,due_date,completed_at,completed_by").eq("employee_id", id).order("created_at");
+  if (error) return <Empty title="Onboarding checklist unavailable" hint="You do not have access to this employee's checklist." />;
+  if (!data?.length && !manage) return <Empty title="No onboarding checklist" hint="HR can add checklist items for this employee." />;
+  const items = data ?? [];
+  const done = items.filter((x) => x.completed_at).length;
+  return <Card title={`Onboarding · ${done}/${items.length} complete`}>
+    <div className="mb-4 h-2 overflow-hidden rounded-full bg-line"><div className="h-full rounded-full bg-volt" style={{ width: `${(done / data.length) * 100}%` }} /></div>
+    {manage && <form action={addOnboardingItem} className="mb-4 grid gap-2 sm:grid-cols-[1fr_160px_150px_auto]"><input type="hidden" name="employee_id" value={id}/><input className="input" name="title" placeholder="Add onboarding task" required minLength={2}/><select className="input" name="category">{["DOCUMENTS","IT_ACCESS","HR_ORIENTATION","TEAM_SETUP","GENERAL"].map((c)=><option key={c}>{c}</option>)}</select><input className="input" type="date" name="due_date"/><button className="btn-primary">Add item</button></form>}
+    <ul className="divide-y divide-line">{items.map((item) => <li key={item.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+      <div><p className={item.completed_at ? "text-muted line-through" : "font-medium"}>{item.title}</p><p className="text-xs text-muted">{item.category.replaceAll("_", " ")}{item.due_date ? ` · Due ${fmtDate(item.due_date)}` : ""}</p></div>
+      <form action={toggleOnboardingItem} className="flex items-center gap-2"><input type="hidden" name="id" value={item.id}/><input type="hidden" name="employee_id" value={id}/><label className="flex items-center gap-2 text-xs"><input type="checkbox" name="completed" defaultChecked={!!item.completed_at}/>{item.completed_at ? "Completed" : "Mark complete"}</label><button className="btn-ghost">Save</button>{manage && <button formAction={removeOnboardingItem} formMethod="post" name="id" value={item.id} className="btn-ghost text-danger">Remove</button>}</form>
+    </li>)}</ul>
+  </Card>;
+}
+
+async function DocumentsTab({ sb, id, manage }: { sb: SB; id: string; manage: boolean }) {
+  const { data, error } = await sb.from("employee_documents").select("id,title,category,original_name,mime_type,size_bytes,expires_on,storage_path,created_at").eq("employee_id", id).order("created_at", { ascending: false });
+  if (error) return <Empty title="Documents unavailable" hint="You do not have access to these employee documents." />;
+  const docs = await Promise.all((data ?? []).map(async (d) => {
+    const { data: signed } = await sb.storage.from("employee-private").createSignedUrl(d.storage_path, 60 * 5);
+    return { ...d, url: signed?.signedUrl ?? null };
+  }));
+  return <div className="space-y-4">
+    {manage && <Card title="Upload confidential document"><form action={uploadEmployeeDocument} encType="multipart/form-data" className="grid gap-3 sm:grid-cols-2">
+      <input type="hidden" name="employee_id" value={id}/>
+      <label><span className="label">Document title</span><input className="input" name="title" required minLength={2} maxLength={160} placeholder="PAN card / Degree certificate"/></label>
+      <label><span className="label">Category</span><select className="input" name="category">{["IDENTITY","EDUCATION","EMPLOYMENT","TAX","BANK","POLICY","OTHER"].map((x)=><option key={x}>{x}</option>)}</select></label>
+      <label><span className="label">Expiry date (optional)</span><input className="input" type="date" name="expires_on"/></label>
+      <label><span className="label">File · max 10 MB</span><input className="input" type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.doc,.docx" required/></label>
+      <div className="sm:col-span-2"><button className="btn-primary">Upload securely</button><p className="mt-1 text-xs text-muted">Stored in a private bucket. Signed download links expire after five minutes.</p></div>
+    </form></Card>}
+    <Card title={`Employee documents · ${docs.length}`}>
+      {!docs.length ? <Empty title="No documents uploaded" hint="HR can securely attach employee documents here."/> : <div className="divide-y divide-line">{docs.map((d) => <div key={d.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+        <div><p className="font-medium">{d.title}</p><p className="text-xs text-muted">{d.category} · {d.original_name} · {(d.size_bytes / 1024).toFixed(0)} KB{d.expires_on ? ` · Expires ${fmtDate(d.expires_on)}` : ""}</p></div>
+        <div className="flex items-center gap-2">{d.url ? <a className="btn-ghost" href={d.url} target="_blank" rel="noreferrer">View / download ↗</a> : <Badge>Unavailable</Badge>}{manage && <form action={deleteEmployeeDocument}><input type="hidden" name="id" value={d.id}/><input type="hidden" name="employee_id" value={id}/><button className="btn-ghost text-danger">Delete</button></form>}</div>
+      </div>)}</div>}
+    </Card>
+  </div>;
+}
+
+async function LettersTab({ sb, id, manage }: { sb: SB; id: string; manage: boolean }) {
+  const { data, error } = await sb.from("employee_letters").select("id,letter_type,reference_no,issued_on,status").eq("employee_id", id).order("issued_on", { ascending: false });
+  if (error) return <Empty title="Employment letters unavailable"/>;
+  return <div className="space-y-4">
+    {manage && <Card title="Issue employment letter"><form action={issueEmployeeLetter} className="flex flex-wrap items-end gap-3"><input type="hidden" name="employee_id" value={id}/><label className="min-w-56 flex-1"><span className="label">Letter type</span><select className="input" name="letter_type">{["OFFER","APPOINTMENT","EXPERIENCE","RELIEVING"].map((x)=><option key={x} value={x}>{x}</option>)}</select></label><button className="btn-primary">Generate letter</button></form><p className="mt-2 text-xs text-muted">The letter stores a dated employee-data snapshot. Open it and use Print → Save as PDF for a printable copy. Experience and relieving letters require EXITED status.</p></Card>}
+    <Card title={`Issued letters · ${data?.length ?? 0}`}>
+      {!data?.length ? <Empty title="No employment letters issued"/> : <div className="divide-y divide-line">{data.map((l)=><div key={l.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className="font-medium">{l.letter_type.replaceAll("_", " ")}</p><p className="text-xs text-muted">{l.reference_no} · {fmtDate(l.issued_on)}</p></div><div className="flex items-center gap-2"><Badge>{l.status}</Badge>{l.status === "ISSUED" && <Link className="btn-ghost" href={`/people/${id}/letters/${l.id}`}>Open / print ↗</Link>}{manage && l.status === "ISSUED" && <form action={revokeEmployeeLetter}><input type="hidden" name="id" value={l.id}/><input type="hidden" name="employee_id" value={id}/><button className="btn-ghost text-danger">Revoke</button></form>}</div></div>)}</div>}
+    </Card>
+  </div>;
+}
+
+async function ProbationTab({ sb, id, manage }: { sb: SB; id: string; manage: boolean }) {
+  const { data, error } = await sb.from("probation_reviews").select("id,due_date,reviewed_on,status,recommendation,comments,next_review_date,created_at").eq("employee_id", id).order("due_date", { ascending: false });
+  if (error) return <Empty title="Probation reviews unavailable"/>;
+  return <div className="space-y-4">
+    {manage && <Card title="Schedule probation review"><form action={createProbationReview} className="grid gap-3 sm:grid-cols-[180px_1fr_auto]"><input type="hidden" name="employee_id" value={id}/><label><span className="label">Review due date</span><input className="input" type="date" name="due_date" required/></label><label><span className="label">Initial notes</span><input className="input" name="comments" maxLength={4000} placeholder="Objectives and review context"/></label><div className="self-end"><button className="btn-primary">Create review</button></div></form></Card>}
+    <Card title={`Probation review history · ${data?.length ?? 0}`}>
+      {!data?.length ? <Empty title="No probation reviews" hint="HR can schedule a review against the employee's probation period."/> : <div className="space-y-4">{data.map((r) => <div key={r.id} className="rounded-xl border border-line p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2"><b>Due {fmtDate(r.due_date)}</b><Badge>{r.status}</Badge></div>
+        {r.recommendation && <p className="mt-2 text-sm">Recommendation: <b>{r.recommendation}</b>{r.next_review_date ? ` · Next review ${fmtDate(r.next_review_date)}` : ""}</p>}
+        {r.comments && <p className="mt-2 whitespace-pre-wrap text-sm text-muted">{r.comments}</p>}
+        {manage && r.status === "DRAFT" && <form action={updateProbationReview} className="mt-3 space-y-2"><input type="hidden" name="id" value={r.id}/><input type="hidden" name="employee_id" value={id}/><textarea className="input min-h-20" name="comments" defaultValue={r.comments ?? ""} placeholder="Review notes"/><button className="btn-primary" name="review_action" value="SUBMIT">Submit review</button></form>}
+        {manage && r.status === "SUBMITTED" && <form action={updateProbationReview} className="mt-3 grid gap-2 sm:grid-cols-[1fr_180px_auto]"><input type="hidden" name="id" value={r.id}/><input type="hidden" name="employee_id" value={id}/><input className="input" name="comments" defaultValue={r.comments ?? ""} placeholder="Final decision notes"/><input className="input" type="date" name="next_review_date"/><div className="flex flex-wrap gap-2 sm:col-span-3"><button className="btn-primary" name="review_action" value="CONFIRM">Confirm employment</button><button className="btn-ghost" name="review_action" value="EXTEND">Extend probation</button><button className="btn-ghost text-danger" name="review_action" value="EXIT">Move to notice</button></div></form>}
+      </div>)}</div>}
+    </Card>
+  </div>;
+}
+
+async function ExitTab({ sb, id, manage }: { sb: SB; id: string; manage: boolean }) {
+  const { data, error } = await sb.from("exit_clearance_items").select("id,title,category,due_date,completed_at,notes").eq("employee_id", id).order("created_at");
+  if (error) return <Empty title="Exit clearance unavailable"/>;
+  const items = data ?? []; const done = items.filter((x) => x.completed_at).length;
+  return <div className="space-y-4">
+    {manage && <Card title="Add clearance requirement"><form action={addExitClearanceItem} className="grid gap-2 sm:grid-cols-[150px_1fr_160px_auto]"><input type="hidden" name="employee_id" value={id}/><select className="input" name="category">{["MANAGER","IT","FINANCE","HR","ADMIN","OTHER"].map((x)=><option key={x}>{x}</option>)}</select><input className="input" name="title" required minLength={2} placeholder="Return laptop, settle advance..."/><input className="input" type="date" name="due_date"/><button className="btn-primary">Add item</button></form></Card>}
+    <Card title={`Exit clearance · ${done}/${items.length} complete`}>
+      {items.length > 0 && <div className="mb-4 h-2 overflow-hidden rounded-full bg-line"><div className="h-full bg-volt" style={{width:`${done/items.length*100}%`}}/></div>}
+      {!items.length ? <Empty title="No exit clearance items" hint="HR can add manager, IT, finance and HR clearance steps when an employee enters notice."/> : <ul className="divide-y divide-line">{items.map((x)=><li key={x.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className={x.completed_at ? "line-through text-muted" : "font-medium"}>{x.title}</p><p className="text-xs text-muted">{x.category}{x.due_date ? ` · Due ${fmtDate(x.due_date)}` : ""}</p></div>{manage ? <form action={toggleExitClearanceItem} className="flex items-center gap-2"><input type="hidden" name="id" value={x.id}/><input type="hidden" name="employee_id" value={id}/><label className="text-xs"><input type="checkbox" name="completed" defaultChecked={!!x.completed_at}/> Complete</label><button className="btn-ghost">Save</button></form> : <Badge>{x.completed_at ? "Complete" : "Pending"}</Badge>}</li>)}</ul>}
+    </Card>
+  </div>;
 }
 
 async function AttendanceTab({ sb, id, start, end, tz }: { sb: SB; id: string; start: string; end: string; tz: string }) {

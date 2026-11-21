@@ -42,7 +42,7 @@ export default async function Access({ searchParams }: { searchParams: Promise<R
 
   return (
     <>
-      <PageHeader eyebrow={sa ? "Super Admin · full control" : `Your level ${ctx.role_level} · you manage roles below you`} title="Access control" />
+      <PageHeader eyebrow={sa ? "Super Admin · full control" : `Your level ${ctx.role_level} · you manage roles below you`} title="Access control">{ctx.permissions.includes("communication.moderate")||ctx.permissions.includes("*")?<Link href="/settings/chat-moderation" className="btn-ghost">Chat moderation</Link>:null}</PageHeader>
       <Flash sp={sp} />
       <Tabs tabs={tabs} active={tab} base="/settings/access" />
 

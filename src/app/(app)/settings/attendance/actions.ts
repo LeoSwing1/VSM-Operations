@@ -52,3 +52,19 @@ export async function removeHoliday(fd: FormData) {
   await sb.rpc("log_audit", { p_action: "holiday.removed", p_entity: "holiday", p_entity_id: data[0]!.holiday_date, p_metadata: { name: data[0]!.name } });
   flash(BACK, "ok", "Holiday removed.");
 }
+
+export async function assignShift(fd: FormData) {
+  const ctx = await requirePerm("attendance.manage");
+  const employee_id = str(fd, "employee_id"), shift_id = str(fd, "shift_id"), effective_from = str(fd, "effective_from"), effective_to = optStr(fd, "effective_to");
+  if (!/^[0-9a-f-]{36}$/i.test(employee_id) || !/^[0-9a-f-]{36}$/i.test(shift_id) || !/^\d{4}-\d{2}-\d{2}$/.test(effective_from) || (effective_to && (!/^\d{4}-\d{2}-\d{2}$/.test(effective_to) || effective_to < effective_from))) flash(BACK, "err", "Check the employee, shift and effective dates.");
+  const sb = await supabaseServer();
+  if (!effective_to) {
+    const { error: closeError } = await sb.from("schedule_assignments").update({ effective_to: new Date(new Date(`${effective_from}T00:00:00Z`).getTime() - 86400000).toISOString().slice(0, 10) })
+      .eq("employee_id", employee_id).is("effective_to", null).lt("effective_from", effective_from);
+    if (closeError) flash(BACK, "err", dbMessage(closeError));
+  }
+  const { error } = await sb.from("schedule_assignments").insert({ org_id: ctx.org_id, employee_id, shift_id, effective_from, effective_to, assigned_by: ctx.employee_id });
+  if (error) flash(BACK, "err", dbMessage(error));
+  await sb.rpc("log_audit", { p_action: "schedule.assigned", p_entity: "schedule_assignment", p_entity_id: employee_id, p_metadata: { shift_id, effective_from, effective_to } });
+  flash(BACK, "ok", "Shift schedule assigned. Attendance calculations will use the effective-dated schedule.");
+}
