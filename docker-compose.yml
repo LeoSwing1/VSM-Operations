@@ -1,0 +1,18 @@
+# Runs the app in Docker against the local Supabase started by scripts/local-up.ps1.
+# Secrets come from .env.docker.local / .env.local on your machine — nothing is baked into the image except public keys.
+services:
+  app:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: http://host.docker.internal:54321
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+    env_file:
+      - .env.local
+    environment:
+      NEXT_PUBLIC_SUPABASE_URL: http://host.docker.internal:54321
+      APP_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

@@ -5,8 +5,9 @@ describe("executive CSV export safety", () => {
   it("quotes commas, quotes and newlines", () => {
     expect(csvCell('North, "Growth"\nTeam')).toBe('"North, ""Growth""\nTeam"');
   });
-  it.each(["=1+1", "+SUM(A1:A2)", "-cmd", "@HYPERLINK(\"x\")", "\tformula", "\rformula"])(
-    "neutralises spreadsheet formula prefix %s", (value) => {
+  it.each(["=1+1", "+SUM(A1:A2)", "-cmd", '@HYPERLINK("x")', "\tformula", "\rformula"])(
+    "neutralises spreadsheet formula prefix %s",
+    (value) => {
       expect(csvCell(value).startsWith("\"'")).toBe(true);
     },
   );

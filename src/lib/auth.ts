@@ -4,8 +4,16 @@ import { redirect } from "next/navigation";
 import { supabaseServer } from "./supabase/server";
 
 export type Role =
-  | "SUPER_ADMIN" | "ADMIN" | "HR_MANAGER" | "OPERATIONS_MANAGER" | "DEPARTMENT_MANAGER"
-  | "TEAM_LEAD" | "SALES_EXECUTIVE" | "PROJECT_MANAGER" | "EMPLOYEE" | "INTERN";
+  | "SUPER_ADMIN"
+  | "ADMIN"
+  | "HR_MANAGER"
+  | "OPERATIONS_MANAGER"
+  | "DEPARTMENT_MANAGER"
+  | "TEAM_LEAD"
+  | "SALES_EXECUTIVE"
+  | "PROJECT_MANAGER"
+  | "EMPLOYEE"
+  | "INTERN";
 
 export interface Ctx {
   employee_id: string;
@@ -24,7 +32,9 @@ export interface Ctx {
 /** Resolve the signed-in employee once per request. Permissions come from the DB, never the client. */
 export const getContext = cache(async (): Promise<Ctx | null> => {
   const supabase = await supabaseServer();
-  const { data: { user } } = await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
   if (!user) return null;
   const { data, error } = await supabase.rpc("my_context");
   if (error || !data) return null;
@@ -52,8 +62,15 @@ export async function requirePerm(...perms: string[]): Promise<Ctx> {
 }
 
 export const ROLE_LABEL: Record<Role, string> = {
-  SUPER_ADMIN: "Super Admin", ADMIN: "Admin", HR_MANAGER: "HR Manager", OPERATIONS_MANAGER: "Operations Manager",
-  DEPARTMENT_MANAGER: "Department Manager", TEAM_LEAD: "Team Lead", SALES_EXECUTIVE: "Sales Executive",
-  PROJECT_MANAGER: "Project Manager", EMPLOYEE: "Employee", INTERN: "Intern",
+  SUPER_ADMIN: "Super Admin",
+  ADMIN: "Admin",
+  HR_MANAGER: "HR Manager",
+  OPERATIONS_MANAGER: "Operations Manager",
+  DEPARTMENT_MANAGER: "Department Manager",
+  TEAM_LEAD: "Team Lead",
+  SALES_EXECUTIVE: "Sales Executive",
+  PROJECT_MANAGER: "Project Manager",
+  EMPLOYEE: "Employee",
+  INTERN: "Intern",
 };
 export const ROLES = Object.keys(ROLE_LABEL) as Role[];

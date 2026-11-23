@@ -8,9 +8,9 @@ export const CATEGORIES: { key: string; label: string; hint: string; live: boole
   { key: "ATTENDANCE", label: "Attendance", hint: "Reminders and corrections", live: true },
   { key: "PERFORMANCE", label: "Performance", hint: "Reviews and snapshots", live: true },
   { key: "PROJECTS", label: "Projects", hint: "Project updates", live: true },
-  { key: "CHAT", label: "Chat", hint: "Messages (arrives with chat, Block 2)", live: false },
-  { key: "ANNOUNCEMENTS", label: "Announcements", hint: "Arrives with Block 3", live: false },
-  { key: "MEETINGS", label: "Meetings", hint: "Arrives with Block 6", live: false },
+  { key: "CHAT", label: "Chat", hint: "New messages in your conversations and team groups", live: true },
+  { key: "ANNOUNCEMENTS", label: "Announcements", hint: "Company announcements", live: true },
+  { key: "MEETINGS", label: "Meetings", hint: "Invitations and reminders", live: true },
   { key: "TRAINING", label: "Training", hint: "Arrives with Block 7", live: false },
   { key: "INTEGRATIONS", label: "Integrations", hint: "Admin alerts about connected services", live: true },
 ];

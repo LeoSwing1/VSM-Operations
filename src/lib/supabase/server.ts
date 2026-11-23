@@ -11,8 +11,11 @@ export async function supabaseServer() {
     cookies: {
       getAll: () => store.getAll(),
       setAll: (list) => {
-        try { list.forEach(({ name, value, options }) => store.set(name, value, hardenCookie(options))); }
-        catch { /* called from a Server Component — middleware refreshes the session */ }
+        try {
+          list.forEach(({ name, value, options }) => store.set(name, value, hardenCookie(options)));
+        } catch {
+          /* called from a Server Component — middleware refreshes the session */
+        }
       },
     },
   });

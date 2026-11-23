@@ -7,20 +7,55 @@ import { dbMessage, flash, num, optStr, str } from "@/lib/actions";
 import { zonedInstant } from "@/lib/engines/time";
 
 const NewTask = z.object({
-  title: z.string().trim().min(2).max(300), description: z.string().trim().max(5000).nullable(),
-  assignee_id: z.string().uuid(), project_id: z.string().uuid().nullable(),
-  priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]), deadline: z.string().nullable(), estimated_hours: z.number().min(0).max(999).nullable(),
+  title: z.string().trim().min(2).max(300),
+  description: z.string().trim().max(5000).nullable(),
+  assignee_id: z.string().uuid(),
+  project_id: z.string().uuid().nullable(),
+  priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]),
+  deadline: z.string().nullable(),
+  estimated_hours: z.number().min(0).max(999).nullable(),
 });
 
 export async function createTask(fd: FormData) {
   const ctx = await requireContext();
-  const p = NewTask.safeParse({ title: str(fd, "title"), description: optStr(fd, "description"), assignee_id: str(fd, "assignee_id") || ctx.employee_id,
-    project_id: optStr(fd, "project_id"), priority: str(fd, "priority") || "MEDIUM", deadline: optStr(fd, "deadline"), estimated_hours: num(fd, "estimated_hours") });
+  const p = NewTask.safeParse({
+    title: str(fd, "title"),
+    description: optStr(fd, "description"),
+    assignee_id: str(fd, "assignee_id") || ctx.employee_id,
+    project_id: optStr(fd, "project_id"),
+    priority: str(fd, "priority") || "MEDIUM",
+    deadline: optStr(fd, "deadline"),
+    estimated_hours: num(fd, "estimated_hours"),
+  });
   if (!p.success) flash("/tasks", "err", p.error.issues[0]?.message ?? "Check the task form.");
   const sb = await supabaseServer();
-  const deadline = p.data.deadline ? zonedInstant(p.data.deadline.slice(0, 10), p.data.deadline.slice(11, 16) || "18:00", ctx.timezone).toISOString() : null;
-  const { error } = await sb.from("tasks").insert({ ...p.data, deadline, org_id: ctx.org_id, status: "TODO" });
+  const deadline = p.data.deadline
+    ? zonedInstant(p.data.deadline.slice(0, 10), p.data.deadline.slice(11, 16) || "18:00", ctx.timezone).toISOString()
+    : null;
+  const { data: task, error } = await sb
+    .from("tasks")
+    .insert({ ...p.data, deadline, org_id: ctx.org_id, status: "TODO" })
+    .select("id")
+    .single();
   if (error) flash("/tasks", "err", dbMessage(error));
+  const { error: workflowError } = await sb.rpc("enqueue_workflow_event", {
+    p_event_key: "task.created",
+    p_idempotency_key: task.id,
+    p_payload: {
+      actor_employee_id: ctx.employee_id,
+      target_employee_id: p.data.assignee_id,
+      task_id: task.id,
+      assignee_id: p.data.assignee_id,
+      title: p.data.title,
+    },
+  });
+  if (workflowError)
+    await sb.rpc("log_audit", {
+      p_action: "workflow.enqueue_failed",
+      p_entity: "task",
+      p_entity_id: task.id,
+      p_metadata: { event_key: "task.created", error: workflowError.message.slice(0, 300) },
+    });
   flash("/tasks", "ok", "Task created.");
 }
 
@@ -47,7 +82,12 @@ export async function reviewTask(fd: FormData) {
   const approve = str(fd, "decision") === "approve";
   const quality = num(fd, "quality");
   const sb = await supabaseServer();
-  const { error } = await sb.rpc("review_task", { p_task: str(fd, "id"), p_approve: approve, p_quality: approve ? quality : null, p_note: optStr(fd, "note") });
+  const { error } = await sb.rpc("review_task", {
+    p_task: str(fd, "id"),
+    p_approve: approve,
+    p_quality: approve ? quality : null,
+    p_note: optStr(fd, "note"),
+  });
   if (error) flash(back, "err", dbMessage(error));
   flash(back, "ok", approve ? "Task approved and scored." : "Sent back for rework.");
 }
@@ -57,8 +97,18 @@ export async function createProject(fd: FormData) {
   const name = str(fd, "name");
   if (name.length < 2) flash("/tasks", "err", "Project name is required.");
   const sb = await supabaseServer();
-  const { data, error } = await sb.from("projects").insert({ org_id: ctx.org_id, name, client_id: optStr(fd, "client_id"), deadline: optStr(fd, "deadline"),
-    manager_id: ctx.employee_id, status: "ACTIVE" }).select("id").single();
+  const { data, error } = await sb
+    .from("projects")
+    .insert({
+      org_id: ctx.org_id,
+      name,
+      client_id: optStr(fd, "client_id"),
+      deadline: optStr(fd, "deadline"),
+      manager_id: ctx.employee_id,
+      status: "ACTIVE",
+    })
+    .select("id")
+    .single();
   if (error) flash("/tasks", "err", dbMessage(error));
   await sb.from("project_members").insert({ project_id: data.id, employee_id: ctx.employee_id });
   flash("/tasks", "ok", "Project created.");

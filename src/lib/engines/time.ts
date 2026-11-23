@@ -45,8 +45,12 @@ export function daysBetweenInclusive(start: string, end: string): number {
   return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000) + 1;
 }
 
-export function maxDate(a: string, b: string) { return a > b ? a : b; }
-export function minDate(a: string, b: string) { return a < b ? a : b; }
+export function maxDate(a: string, b: string) {
+  return a > b ? a : b;
+}
+export function minDate(a: string, b: string) {
+  return a < b ? a : b;
+}
 
 export function fmtDateTime(instant: string | Date, tz = DEFAULT_TZ) {
   return formatInTimeZone(new Date(instant), tz, "dd MMM yyyy, hh:mm a");

@@ -9,7 +9,8 @@ export function flash(path: string, kind: "ok" | "err", msg: string): never {
 }
 
 /** Turn DB errors into safe, human messages. Business-rule exceptions raised in SQL are shown; internals are not. */
-export function dbMessage(e: PostgrestError | null | undefined, fallback = "Something went wrong."): string {
+type AnyDbError = Pick<PostgrestError, "message"> & Partial<Pick<PostgrestError, "code">>;
+export function dbMessage(e: AnyDbError | null | undefined, fallback = "Something went wrong."): string {
   if (!e) return fallback;
   if (e.code === "P0001" || e.code === "42501" || e.code === "P0002") return capitalise(e.message);
   if (e.code === "23505") return "That record already exists.";
@@ -20,11 +21,20 @@ export function dbMessage(e: PostgrestError | null | undefined, fallback = "Some
   return fallback;
 }
 
-function capitalise(s: string) { return s.charAt(0).toUpperCase() + s.slice(1); }
+function capitalise(s: string) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
-export function str(fd: FormData, k: string): string { return String(fd.get(k) ?? "").trim(); }
-export function optStr(fd: FormData, k: string): string | null { const v = str(fd, k); return v === "" ? null : v; }
+export function str(fd: FormData, k: string): string {
+  return String(fd.get(k) ?? "").trim();
+}
+export function optStr(fd: FormData, k: string): string | null {
+  const v = str(fd, k);
+  return v === "" ? null : v;
+}
 export function num(fd: FormData, k: string): number | null {
-  const v = str(fd, k); if (v === "") return null;
-  const n = Number(v); return Number.isFinite(n) ? n : null;
+  const v = str(fd, k);
+  if (v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }

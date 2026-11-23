@@ -245,7 +245,7 @@ create trigger finance_vendors_audit after insert or update or delete on vendors
 
 -- Read-only report views, scoped by the underlying RLS-protected tables.
 create view finance_monthly_summary with (security_invoker=true) as
-select org_id,date_trunc('month',expense_date)::date month,
+select org_id,date_trunc('month',expense_date)::date as month,
  sum(amount) filter(where status in ('APPROVED','PAID')) as approved_expenditure,
  sum(amount) filter(where status='PAID') as paid_expenditure,
  count(*) filter(where status in ('SUBMITTED','MANAGER_APPROVED')) as pending_approvals

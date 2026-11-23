@@ -14,7 +14,10 @@ export async function signIn(fd: FormData) {
   const sb = await supabaseServer();
   const { error } = await sb.auth.signInWithPassword(parsed.data);
   // Same message for unknown user / wrong password — no account enumeration.
-  if (error) redirect(`/login?err=${encodeURIComponent(error.status === 429 ? "Too many attempts. Wait a few minutes and try again." : "Incorrect email or password.")}`);
+  if (error)
+    redirect(
+      `/login?err=${encodeURIComponent(error.status === 429 ? "Too many attempts. Wait a few minutes and try again." : "Incorrect email or password.")}`,
+    );
   redirect(safeNext);
 }
 
@@ -30,11 +33,15 @@ export async function sendReset(fd: FormData) {
 }
 
 export async function setNewPassword(fd: FormData) {
-  const pw = String(fd.get("password") ?? ""), confirm = String(fd.get("confirm") ?? "");
-  if (pw.length < 10 || pw !== confirm) redirect(`/login/reset?err=${encodeURIComponent("Passwords must match and be at least 10 characters.")}`);
+  const pw = String(fd.get("password") ?? ""),
+    confirm = String(fd.get("confirm") ?? "");
+  if (pw.length < 10 || pw !== confirm)
+    redirect(
+      `/login/reset?err=${encodeURIComponent("Passwords must match and be at least 10 characters.")}${fd.get("forced") ? "&forced=1" : ""}`,
+    );
   const sb = await supabaseServer();
-  const { error } = await sb.auth.updateUser({ password: pw });
+  const { error } = await sb.auth.updateUser({ password: pw, data: { must_change_password: false } });
   if (error) redirect(`/login/reset?err=${encodeURIComponent("Reset link expired. Request a new one.")}`);
-  await sb.auth.signOut({ scope: "others" });      // revoke other sessions after a password change
+  await sb.auth.signOut({ scope: "others" }); // revoke other sessions after a password change
   redirect(`/dashboard?ok=${encodeURIComponent("Password updated.")}`);
 }

@@ -3,18 +3,195 @@ import { supabaseServer } from "@/lib/supabase/server";
 import { Badge, Card, Empty, Field, Flash, PageHeader, TableWrap, inr } from "@/components/ui";
 import { fmtDate, localDate } from "@/lib/engines/time";
 import { createReconciliation, addStatementLine, matchStatementLine, closeReconciliation } from "../actions";
-export const metadata={title:"Bank reconciliation"};
-export default async function Reconciliation({searchParams}:{searchParams:Promise<Record<string,string|undefined>>}){
- const sp=await searchParams,ctx=await requirePerm("finance.manage","finance.view"),sb=await supabaseServer();
- const [{data:heads},{data:lines},{data:expenses},{data:invoicePayments},{data:vendorPayments}] = await Promise.all([
-  sb.from("bank_reconciliations").select("*").order("statement_date",{ascending:false}).limit(100),sb.from("bank_statement_lines").select("*").order("transaction_date",{ascending:false}).limit(500),
-  sb.from("finance_expenses").select("id,expense_code,amount,status").eq("status","PAID").limit(300),sb.from("invoice_payments").select("id,reference,amount").limit(300),sb.from("vendor_payments").select("id,reference,amount").limit(300)
- ]);
- return <><PageHeader eyebrow="Finance · bank controls" title="Reconciliation"><a className="btn-ghost" href="/finance">Finance overview</a></PageHeader><Flash sp={sp}/>
- {can(ctx,"finance.manage")&&<Card title="Open a bank statement reconciliation" className="mb-6"><form action={createReconciliation} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"><Field label="Statement date"><input type="date" name="statement_date" className="input" defaultValue={localDate(new Date(),ctx.timezone)} required/></Field><Field label="Bank account label"><input name="bank_account_label" className="input" placeholder="Current account •••• 1234" required/></Field><Field label="Opening balance"><input name="opening_balance" type="number" step="0.01" className="input" defaultValue="0" required/></Field><Field label="Closing balance"><input name="closing_balance" type="number" step="0.01" className="input" required/></Field><Field label="Notes"><input name="notes" className="input"/></Field><div><button className="btn-primary">Create reconciliation</button></div></form></Card>}
- <Card title="Reconciliation batches" className="mb-6">{!heads?.length?<Empty title="No bank statements yet" hint="Create a statement batch and add the transaction lines from your bank export."/>:<TableWrap><table className="table min-w-[650px]"><thead><tr><th>Statement</th><th>Account</th><th>Opening</th><th>Closing</th><th>Status</th></tr></thead><tbody>{heads.map(h=><tr key={h.id}><td>{fmtDate(h.statement_date)}<div className="text-xs text-muted">{h.id.slice(0,8)}</div></td><td>{h.bank_account_label}</td><td>{inr(h.opening_balance)}</td><td>{inr(h.closing_balance)}</td><td><div className="flex items-center gap-2"><Badge>{h.status}</Badge>{can(ctx,"finance.manage")&&h.status==="OPEN"&&<form action={closeReconciliation}><input type="hidden" name="id" value={h.id}/><button className="btn-ghost text-xs">Reconcile & close</button></form>}</div></td></tr>)}</tbody></table></TableWrap>}</Card>
- {can(ctx,"finance.manage")&&heads?.length>0&&<Card title="Add statement transaction" className="mb-6"><form action={addStatementLine} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"><Field label="Statement batch"><select name="reconciliation_id" className="input" required>{heads.map(h=><option key={h.id} value={h.id}>{h.bank_account_label} · {fmtDate(h.statement_date)}</option>)}</select></Field><Field label="Transaction date"><input type="date" name="transaction_date" className="input" defaultValue={localDate(new Date(),ctx.timezone)} required/></Field><Field label="Description"><input name="description" className="input" required/></Field><Field label="Reference"><input name="reference" className="input"/></Field><Field label="Debit"><input name="debit" type="number" min="0" step="0.01" defaultValue="0" className="input"/></Field><Field label="Credit"><input name="credit" type="number" min="0" step="0.01" defaultValue="0" className="input"/></Field><div><button className="btn-primary">Add line</button></div></form></Card>}
- <Card title="Statement lines">{!lines?.length?<Empty title="No statement lines"/>:<TableWrap><table className="table min-w-[1000px]"><thead><tr><th>Date / description</th><th>Reference</th><th>Debit</th><th>Credit</th><th>Match</th><th>Link record</th></tr></thead><tbody>{lines.map((l:any)=><tr key={l.id}><td>{fmtDate(l.transaction_date)}<div className="text-xs text-muted">{l.description}</div></td><td>{l.reference||"—"}</td><td>{l.debit?inr(l.debit):"—"}</td><td>{l.credit?inr(l.credit):"—"}</td><td>{l.matched_id?<Badge tone="green">Matched</Badge>:<Badge>Unmatched</Badge>}</td><td>{can(ctx,"finance.manage")&&!l.matched_id&&<form action={matchStatementLine} className="flex flex-wrap gap-1"><input type="hidden" name="id" value={l.id}/><select name="matched_type" className="input w-32"><option value="EXPENSE">Expense</option><option value="VENDOR_PAYMENT">Vendor payment</option><option value="INVOICE_PAYMENT">Invoice receipt</option></select><select name="matched_id" className="input w-44" required><option value="">Select record</option>{(expenses??[]).map(e=><option key={e.id} value={e.id}>{e.expense_code} · {e.amount}</option>)}{(vendorPayments??[]).map(p=><option key={p.id} value={p.id}>Vendor · {p.reference} · {p.amount}</option>)}{(invoicePayments??[]).map(p=><option key={p.id} value={p.id}>Invoice · {p.reference} · {p.amount}</option>)}</select><button className="btn-ghost text-xs">Match</button></form>}</td></tr>)}</tbody></table></TableWrap>}</Card>
- <p className="mt-4 text-xs text-muted">Matching checks the exact amount and debit/credit direction against an internal ledger record. Importing the statement, confirming the bank account and reviewing duplicate references remain manual controls; do not close a batch until those checks are complete.</p>
- </>;
+export const metadata = { title: "Bank reconciliation" };
+export default async function Reconciliation({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
+  const sp = await searchParams,
+    ctx = await requirePerm("finance.manage", "finance.view"),
+    sb = await supabaseServer();
+  const [{ data: heads }, { data: lines }, { data: expenses }, { data: invoicePayments }, { data: vendorPayments }] = await Promise.all([
+    sb.from("bank_reconciliations").select("*").order("statement_date", { ascending: false }).limit(100),
+    sb.from("bank_statement_lines").select("*").order("transaction_date", { ascending: false }).limit(500),
+    sb.from("finance_expenses").select("id,expense_code,amount,status").eq("status", "PAID").limit(300),
+    sb.from("invoice_payments").select("id,reference,amount").limit(300),
+    sb.from("vendor_payments").select("id,reference,amount").limit(300),
+  ]);
+  return (
+    <>
+      <PageHeader eyebrow="Finance · bank controls" title="Reconciliation">
+        <a className="btn-ghost" href="/finance">
+          Finance overview
+        </a>
+      </PageHeader>
+      <Flash sp={sp} />
+      {can(ctx, "finance.manage") && (
+        <Card title="Open a bank statement reconciliation" className="mb-6">
+          <form action={createReconciliation} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <Field label="Statement date">
+              <input type="date" name="statement_date" className="input" defaultValue={localDate(new Date(), ctx.timezone)} required />
+            </Field>
+            <Field label="Bank account label">
+              <input name="bank_account_label" className="input" placeholder="Current account •••• 1234" required />
+            </Field>
+            <Field label="Opening balance">
+              <input name="opening_balance" type="number" step="0.01" className="input" defaultValue="0" required />
+            </Field>
+            <Field label="Closing balance">
+              <input name="closing_balance" type="number" step="0.01" className="input" required />
+            </Field>
+            <Field label="Notes">
+              <input name="notes" className="input" />
+            </Field>
+            <div>
+              <button className="btn-primary">Create reconciliation</button>
+            </div>
+          </form>
+        </Card>
+      )}
+      <Card title="Reconciliation batches" className="mb-6">
+        {!heads?.length ? (
+          <Empty title="No bank statements yet" hint="Create a statement batch and add the transaction lines from your bank export." />
+        ) : (
+          <TableWrap>
+            <table className="table min-w-[650px]">
+              <thead>
+                <tr>
+                  <th>Statement</th>
+                  <th>Account</th>
+                  <th>Opening</th>
+                  <th>Closing</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {heads.map((h) => (
+                  <tr key={h.id}>
+                    <td>
+                      {fmtDate(h.statement_date)}
+                      <div className="text-xs text-muted">{h.id.slice(0, 8)}</div>
+                    </td>
+                    <td>{h.bank_account_label}</td>
+                    <td>{inr(h.opening_balance)}</td>
+                    <td>{inr(h.closing_balance)}</td>
+                    <td>
+                      <div className="flex items-center gap-2">
+                        <Badge>{h.status}</Badge>
+                        {can(ctx, "finance.manage") && h.status === "OPEN" && (
+                          <form action={closeReconciliation}>
+                            <input type="hidden" name="id" value={h.id} />
+                            <button className="btn-ghost text-xs">Reconcile & close</button>
+                          </form>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
+        )}
+      </Card>
+      {can(ctx, "finance.manage") && heads && heads.length > 0 && (
+        <Card title="Add statement transaction" className="mb-6">
+          <form action={addStatementLine} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <Field label="Statement batch">
+              <select name="reconciliation_id" className="input" required>
+                {heads.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.bank_account_label} · {fmtDate(h.statement_date)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Transaction date">
+              <input type="date" name="transaction_date" className="input" defaultValue={localDate(new Date(), ctx.timezone)} required />
+            </Field>
+            <Field label="Description">
+              <input name="description" className="input" required />
+            </Field>
+            <Field label="Reference">
+              <input name="reference" className="input" />
+            </Field>
+            <Field label="Debit">
+              <input name="debit" type="number" min="0" step="0.01" defaultValue="0" className="input" />
+            </Field>
+            <Field label="Credit">
+              <input name="credit" type="number" min="0" step="0.01" defaultValue="0" className="input" />
+            </Field>
+            <div>
+              <button className="btn-primary">Add line</button>
+            </div>
+          </form>
+        </Card>
+      )}
+      <Card title="Statement lines">
+        {!lines?.length ? (
+          <Empty title="No statement lines" />
+        ) : (
+          <TableWrap>
+            <table className="table min-w-[1000px]">
+              <thead>
+                <tr>
+                  <th>Date / description</th>
+                  <th>Reference</th>
+                  <th>Debit</th>
+                  <th>Credit</th>
+                  <th>Match</th>
+                  <th>Link record</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((l: any) => (
+                  <tr key={l.id}>
+                    <td>
+                      {fmtDate(l.transaction_date)}
+                      <div className="text-xs text-muted">{l.description}</div>
+                    </td>
+                    <td>{l.reference || "—"}</td>
+                    <td>{l.debit ? inr(l.debit) : "—"}</td>
+                    <td>{l.credit ? inr(l.credit) : "—"}</td>
+                    <td>{l.matched_id ? <Badge tone="green">Matched</Badge> : <Badge>Unmatched</Badge>}</td>
+                    <td>
+                      {can(ctx, "finance.manage") && !l.matched_id && (
+                        <form action={matchStatementLine} className="flex flex-wrap gap-1">
+                          <input type="hidden" name="id" value={l.id} />
+                          <select name="matched_type" className="input w-32">
+                            <option value="EXPENSE">Expense</option>
+                            <option value="VENDOR_PAYMENT">Vendor payment</option>
+                            <option value="INVOICE_PAYMENT">Invoice receipt</option>
+                          </select>
+                          <select name="matched_id" className="input w-44" required>
+                            <option value="">Select record</option>
+                            {(expenses ?? []).map((e) => (
+                              <option key={e.id} value={e.id}>
+                                {e.expense_code} · {e.amount}
+                              </option>
+                            ))}
+                            {(vendorPayments ?? []).map((p) => (
+                              <option key={p.id} value={p.id}>
+                                Vendor · {p.reference} · {p.amount}
+                              </option>
+                            ))}
+                            {(invoicePayments ?? []).map((p) => (
+                              <option key={p.id} value={p.id}>
+                                Invoice · {p.reference} · {p.amount}
+                              </option>
+                            ))}
+                          </select>
+                          <button className="btn-ghost text-xs">Match</button>
+                        </form>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
+        )}
+      </Card>
+      <p className="mt-4 text-xs text-muted">
+        Matching checks the exact amount and debit/credit direction against an internal ledger record. Importing the statement, confirming
+        the bank account and reviewing duplicate references remain manual controls; do not close a batch until those checks are complete.
+      </p>
+    </>
+  );
 }

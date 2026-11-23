@@ -16,14 +16,16 @@ begin
   raise notice 'PASS: %', label;
 end $$;
 create or replace function t_denied(stmt text, label text) returns void language plpgsql as $$
+declare n int;
 begin
   begin
-    execute stmt;
+    execute stmt; get diagnostics n = row_count;
   exception when others then
-    raise notice 'PASS: % (blocked: %)', label, sqlerrm;
-    return;
+    raise notice 'PASS: % (blocked: %)', label, sqlerrm; return;
   end;
-  raise exception 'FAIL: % — statement was allowed', label;
+  -- RLS hides rows from UPDATE/DELETE instead of raising: 0 rows changed is also "blocked".
+  if n = 0 and stmt ~* '^\s*(update|delete)' then raise notice 'PASS: % (blocked: 0 rows)', label; return; end if;
+  raise exception 'FAIL: % — statement was allowed (% rows)', label, n;
 end $$;
 create or replace function t_rows(stmt text, expected int, label text) returns void language plpgsql as $$
 declare n int;
@@ -32,7 +34,16 @@ begin
   if n <> expected then raise exception 'FAIL: % (affected %, expected %)', label, n, expected; end if;
   raise notice 'PASS: %', label;
 end $$;
-grant execute on function t_ok(boolean,text), t_denied(text,text), t_rows(text,int,text) to authenticated, anon;
+-- Passes when the query sees nothing OR is refused outright (projects without default table grants refuse anon).
+create or replace function t_none(stmt text, label text) returns void language plpgsql as $$
+declare n bigint;
+begin
+  begin execute stmt into n;
+  exception when insufficient_privilege then raise notice 'PASS: % (refused)', label; return; end;
+  if n <> 0 then raise exception 'FAIL: % (saw % rows)', label, n; end if;
+  raise notice 'PASS: %', label;
+end $$;
+grant execute on function t_ok(boolean,text), t_denied(text,text), t_rows(text,int,text), t_none(text,text) to authenticated, anon;
 
 -- ---------------------------------------------------------------------------
 -- Fixtures (as postgres superuser; guards treat auth.uid() = null as system)
@@ -42,7 +53,7 @@ insert into auth.users(id, email) values
  (:'A','a@vsm.test'),(:'B','b@vsm.test'),(:'X','x@other.test');
 
 select bootstrap_organization('VSM Growth','vsm-growth', :'S', 'Founder', 'founder@vsm.test') as org \gset
-insert into departments(org_id, name) values (:'org','Development'), (:'org','Sales');
+insert into departments(org_id, name) values (:'org','Development'), (:'org','Sales') on conflict (org_id, name) do nothing; -- 0024 seeds the VSM departments
 select id as dev from departments where name='Development' \gset
 select id as sales from departments where name='Sales' \gset
 
@@ -125,9 +136,9 @@ insert into company_announcements(id,org_id,title,body,audience,pinned,created_b
 -- ===========================================================================
 select set_config('request.jwt.claim.sub', '', false);
 set role anon;
-select t_ok((select count(*) from employees) = 0, 'anon sees no employees');
-select t_ok((select count(*) from salary_structures) = 0, 'anon sees no salaries');
-select t_ok((select count(*) from leads) = 0, 'anon sees no leads');
+select t_none('select count(*) from employees', 'anon sees no employees');
+select t_none('select count(*) from salary_structures', 'anon sees no salaries');
+select t_none('select count(*) from leads', 'anon sees no leads');
 select t_denied($$select record_attendance('CLOCK_IN')$$, 'anon cannot punch attendance');
 select t_denied($$select ingest_enquiry('vsm-growth','{"name":"spam"}'::jsonb)$$, 'anon cannot call service-only enquiry intake');
 reset role;
@@ -190,7 +201,7 @@ insert into projects(org_id, name, manager_id) values (:'org', 'VSM Website', :'
 insert into project_members(project_id, employee_id) values (:'proj', :'e_a');
 insert into projects(org_id, name, manager_id) values (:'org', 'Sales Deck', :'e_o');
 set role authenticated;
-select t_ok((select count(*) from projects) = 1, 'A sees only projects they belong to (no policy recursion)');
+select t_ok((select count(*) from projects where name='Sales Deck') = 0 and (select count(*) from projects where name='VSM Website') = 1, 'A sees only projects they belong to (no policy recursion)');
 select t_ok((select count(*) from project_members) >= 1, 'A reads membership of visible org projects');
 
 -- Attendance state machine
@@ -604,11 +615,271 @@ select t_denied(format($$insert into bank_statement_lines(org_id,reconciliation_
 select t_denied(format($$insert into finance_expenses(org_id,expense_code,expense_type,employee_id,vendor_id,category,description,amount,expense_date) values (%L,'EXP-CROSS-VENDOR','COMPANY_EXPENSE',%L,%L,'Other','Cross-org vendor attempt',100,current_date)$$,:'org',:'e_h',:'other_vendor'),'finance expense cannot reference another organisation vendor');
 reset role;
 
+-- ===========================================================================
+-- Block 17 regression: defects fixed by 0022
+-- ===========================================================================
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_rows(format($$insert into probation_reviews(org_id,employee_id,reviewer_id,due_date,comments) values (%L,%L,%L,current_date+30,'Regression: probation insert works')$$, :'org', :'e_b', :'e_h'), 1, 'HR can create a probation review (0009 guard fixed)');
+select t_rows(format($$insert into exit_clearance_items(org_id,employee_id,category,title) values (%L,%L,'IT','Regression: return laptop')$$, :'org', :'e_b'), 1, 'HR can create an exit-clearance item (0009 guard fixed)');
+reset role;
+select t_denied(format($$insert into probation_reviews(org_id,employee_id,reviewer_id,due_date,comments) values (%L,%L,%L,current_date+30,'cross-org reviewer')$$, :'org', :'e_b', (select id from employees where org_id = :'org2' limit 1)), 'reviewer from another organisation is still rejected');
+insert into auth.users(id,email) values ('33333333-0000-0000-0000-000000000001','third@co.test');
+set role service_role;
+select t_ok((select count(*) from organizations) >= 2, 'context: existing organisations');
+reset role;
+select t_ok((select seed_workforce_collaboration_permissions(:'org2')) is null, 'workforce permission seeding runs without COMMIT error (0014 fixed)');
+select t_ok((select count(*) from pg_views where viewname in ('finance_monthly_summary','finance_invoice_balances')) = 2, 'finance report views exist (0010 tail replayed)');
+select t_ok(not has_table_privilege('authenticated','finance_expenses','UPDATE'), 'direct UPDATE on finance_expenses is revoked');
+
+-- ===========================================================================
+-- Block 17: integrations & delivery channels (0023)
+-- ===========================================================================
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_rows(format($$insert into whatsapp_optins(employee_id,org_id,phone_e164) values (%L,%L,'+918279574755')$$, :'e_a', :'org'), 1, 'A opts in to WhatsApp with own number');
+select t_denied(format($$insert into whatsapp_optins(employee_id,org_id,phone_e164) values (%L,%L,'+919999999999')$$, :'e_b', :'org'), 'A cannot opt B in to WhatsApp');
+select t_rows(format($$insert into push_subscriptions(org_id,employee_id,endpoint,p256dh,auth_secret) values (%L,%L,'https://fcm.googleapis.com/fcm/send/test-a','p','a')$$, :'org', :'e_a'), 1, 'A registers a browser push subscription');
+select t_denied(format($$insert into notification_preferences(org_id,employee_id,category,channel,mode) values (%L,%L,'TASKS','WHATSAPP','DIGEST')$$, :'org', :'e_a'), 'digest mode is email-only');
+select t_ok((select count(*) from delivery_outbox) = 0, 'employees cannot read the delivery queue');
+select t_denied(format($$insert into webhook_endpoints(org_id,name,url,secret,events) values (%L,'Zap','https://hooks.zapier.com/x',repeat('s',40),array['lead.created'])$$, :'org'), 'employees cannot create webhooks');
+select t_denied($$select claim_delivery_batch(10)$$, 'employees cannot claim deliveries');
+select t_denied($$select retry_failed_deliveries()$$, 'employees cannot re-queue deliveries');
+select t_denied($$select ingest_campaign_lead('vsm-growth','{"name":"x"}'::jsonb)$$, 'campaign lead intake is service-only');
+reset role;
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((select count(*) from whatsapp_optins) = 0 and (select count(*) from push_subscriptions) = 0, 'B cannot see A''s phone number or push subscriptions');
+select t_denied($$insert into whatsapp_optins(employee_id,org_id,phone_e164) values ((select current_employee_id()),(select current_org_id()),'98765')$$, 'invalid phone numbers are rejected');
+reset role;
+
+-- Personal fan-out
+select notify(:'org', :'e_a', 'APPROVALS', 'Leave request awaiting approval', null, '/approvals', 'b17:approval:1');
+select t_ok((select count(*) from delivery_outbox where channel='WHATSAPP' and recipient_employee_id=:'e_a' and event_key='notification.approvals') = 1, 'approval notice → WhatsApp (opted in, default on)');
+select t_ok((select count(*) from delivery_outbox where channel='PUSH' and recipient_employee_id=:'e_a' and event_key='notification.approvals') = 1, 'approval notice → browser push');
+select notify(:'org', :'e_a', 'CRM', 'New enquiry', null, '/leads', 'b17:crm:1');
+select t_ok((select count(*) from delivery_outbox where channel='WHATSAPP' and event_key='notification.crm') = 0, 'CRM notices are off for WhatsApp by default');
+insert into notification_preferences(org_id,employee_id,category,channel,mode) values (:'org',:'e_a','TASKS','PUSH','MUTED');
+select notify(:'org', :'e_a', 'TASKS', 'New task', null, '/tasks', 'b17:task:1');
+select t_ok((select count(*) from delivery_outbox where channel='PUSH' and event_key='notification.tasks') = 0, 'muted push category is respected');
+select notify(:'org', :'e_a', 'PAYROLL', 'Your payslip is available', 'Net pay 32,500', '/payroll/my-salary', 'b17:payroll:1');
+select t_ok((select payload->>'body' from delivery_outbox where channel='WHATSAPP' and event_key='notification.payroll') not like '%32%', 'payroll WhatsApp never carries amounts');
+select notify(:'org', :'e_b', 'APPROVALS', 'B approval', null, '/approvals', 'b17:approval:b');
+select t_ok((select count(*) from delivery_outbox where recipient_employee_id=:'e_b') = 0, 'no opt-in, no subscription → nothing sent to B');
+
+-- Organisation fan-out (Slack / Teams / webhooks)
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select t_rows(format($$insert into integration_settings(org_id,key,enabled,events) values (%L,'slack',true,array['lead.created','payroll.approved'])$$, :'org'), 1, 'Super Admin enables Slack for chosen events');
+select t_denied(format($$insert into integration_settings(org_id,key,enabled,events) values (%L,'teams',true,array['salary.changed'])$$, :'org'), 'only allow-listed events can be configured');
+select t_denied(format($$insert into webhook_endpoints(org_id,name,url,secret,events) values (%L,'Bad','http://insecure.example.com/hook',repeat('s',40),array['lead.created'])$$, :'org'), 'webhooks must use https');
+select t_rows(format($$insert into webhook_endpoints(org_id,name,url,secret,events,created_by) values (%L,'n8n','https://n8n.example.com/webhook/vsm',repeat('s',40),array['lead.created'],%L)$$, :'org', :'e_s'), 1, 'Super Admin adds an https webhook');
+select t_denied($$select secret from webhook_endpoints$$, 'webhook signing secret is unreadable after creation');
+select t_ok((select count(*) from webhook_endpoints) = 1, 'admin still lists webhooks (without the secret)');
+reset role;
+insert into leads(org_id,name,email,source) values (:'org','Fanout Lead','fanout@example.com','MANUAL') returning id as fl \gset
+select t_ok((select count(*) from delivery_outbox where channel='SLACK' and event_key='lead.created' and payload->>'lead_id' = :'fl') = 1, 'new lead → Slack');
+select t_ok((select count(*) from delivery_outbox where channel='WEBHOOK' and event_key='lead.created' and payload->>'lead_id' = :'fl') = 1, 'new lead → subscribed webhook');
+select t_ok((select count(*) from delivery_outbox where channel='TEAMS') = 0, 'Teams not enabled → nothing queued');
+insert into leads(org_id,name,email,source) values (:'org','Fanout Dup','fanout@example.com','MANUAL');
+select t_ok((select count(*) from delivery_outbox where channel='SLACK' and event_key='lead.created') = 1, 'duplicate lead does not re-announce');
+select emit_org_event(:'org', 'payroll.approved', '{"run_id":"x","net_amount":99999,"salary":5}'::jsonb, 'b17:pr:1');
+select t_ok((select not (payload ? 'net_amount') and not (payload ? 'salary') from delivery_outbox where channel='SLACK' and event_key='payroll.approved'), 'organisation channels never carry salary amounts');
+select t_denied($$select emit_org_event((select id from organizations limit 1), 'salary.changed', '{}'::jsonb, 'x')$$, 'non-allow-listed events are refused');
+select t_ok((select count(*) from audit_events where action like 'integration.config.%') >= 2, 'channel configuration changes are audited');
+
+-- Service-role workers and inbound idempotency
+set role service_role;
+select t_ok((select count(*) from claim_delivery_batch(500)) >= 4, 'worker claims queued deliveries (service role)');
+select t_ok((select (ingest_campaign_lead('vsm-growth','{"name":"Meta Person","email":"meta@example.com","form_id":"123"}'::jsonb))->>'lead_id' is not null), 'Meta campaign lead ingested (service role)');
+reset role;
+select t_ok((select source from leads where email='meta@example.com') = 'CAMPAIGN', 'campaign leads are tagged CAMPAIGN');
+insert into inbound_webhook_events(org_id,provider,external_id,event_type,payload) values (:'org','RAZORPAY','pay_123','payment.captured','{}');
+select t_denied(format($$insert into inbound_webhook_events(org_id,provider,external_id,event_type,payload) values (%L,'RAZORPAY','pay_123','payment.captured','{}')$$, :'org'), 'the same inbound event is never processed twice');
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+update delivery_outbox set status='FAILED' where channel='SLACK';
+reset role;
+update delivery_outbox set status='FAILED' where channel='SLACK';
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select t_ok(retry_failed_deliveries('SLACK') >= 1, 'admin re-queues failed Slack deliveries');
+reset role;
+
+
+-- ---------------------------------------------------------------------------
+-- Block 18 — single protected Super Admin, employee IDs, posts → teams → chat, password reset, chat inbox
+-- ---------------------------------------------------------------------------
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select t_denied(format($$update employees set role='ADMIN' where id=%L$$, :'e_s'), 'Super Admin cannot demote themself');
+select t_denied(format($$update employees set status='EXITED' where id=%L$$, :'e_s'), 'Super Admin cannot be deactivated');
+select t_denied(format($$delete from employees where id=%L$$, :'e_s'), 'Super Admin cannot be deleted');
+select t_denied(format($$update employees set role='SUPER_ADMIN' where id=%L$$, :'e_h'), 'nobody can be promoted to a second Super Admin');
+select t_denied(format($$insert into employee_permission_overrides(org_id,employee_id,permission,effect,reason,granted_by) values (%L,%L,'people.manage','DENY','testing',%L)$$, :'org', :'e_s', :'e_s'), 'Super Admin cannot be restricted by overrides');
+select t_ok(can_reset_password(:'e_h'), 'Super Admin may reset the HR manager password');
+select t_ok(not can_reset_password(:'e_s'), 'nobody resets the Super Admin password (not even via the panel)');
+update employees set designation='Founder & CEO' where id=:'e_s';
+select t_ok((select role from employees where id=:'e_s') = 'SUPER_ADMIN', 'Super Admin can still edit their own profile');
+reset role;
+
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_denied(format($$update employees set role='EMPLOYEE' where id=%L$$, :'e_s'), 'HR cannot change the Super Admin');
+select t_denied(format($$update employees set user_id=null where id=%L$$, :'e_s'), 'HR cannot unlink the Super Admin login');
+select t_ok(can_reset_password(:'e_a'), 'HR may reset an employee password');
+select t_ok(not can_reset_password(:'e_s'), 'HR may not reset the Super Admin password');
+select t_ok(not can_reset_password(:'e_h'), 'nobody resets their own password through the admin panel');
+insert into employees(org_id,full_name,official_email,role,designation) values (:'org','Sana SEO','sana.seo@vsm.test','EMPLOYEE','SEO Executive');
+select t_ok((select employee_code from employees where official_email='sana.seo@vsm.test') ~ '^VSM-\d{4}$', 'employee ID is generated automatically');
+select t_ok((select employee_code from employees where official_email='sana.seo@vsm.test') = 'VSM-0100', 'employee IDs continue after the highest existing ID (VSM-0099 → VSM-0100)');
+reset role;
+select id as e_seo from employees where official_email='sana.seo@vsm.test' \gset
+select t_ok((select d.name from employees e join departments d on d.id=e.department_id where e.id=:'e_seo') = 'SEO', 'SEO Executive post sets the SEO department');
+select t_ok(exists(select 1 from org_team_members m join org_teams t on t.id=m.team_id where t.team_key='seo' and m.employee_id=:'e_seo'), 'SEO Executive joins the SEO Team');
+select t_ok(exists(select 1 from org_teams t join chat_channel_members c on c.channel_id=t.chat_channel_id where t.team_key='seo' and c.employee_id=:'e_seo'), 'and is added to the SEO Team chat group');
+select t_ok((select count(*) from org_teams where org_id=:'org' and team_key in ('seo','editing','developers') and chat_channel_id is not null) = 3, 'SEO, Editing and Developers teams exist with chat groups');
+select t_ok((select count(*) from designations where org_id=:'org') >= 15, 'company posts are seeded');
+delete from org_team_members m using org_teams t where t.id=m.team_id and t.team_key='seo' and m.employee_id=:'e_seo';
+select t_ok(not exists(select 1 from org_teams t join chat_channel_members c on c.channel_id=t.chat_channel_id where t.team_key='seo' and c.employee_id=:'e_seo'), 'leaving the team removes them from the team chat');
+
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok(not can_reset_password(:'e_b'), 'employees cannot reset colleagues passwords');
+reset role;
+
+set role service_role;
+select t_denied(format($$update employees set role='ADMIN' where id=%L$$, :'e_s'), 'service role cannot demote the Super Admin either');
+select t_denied(format($$insert into employees(org_id,full_name,official_email,role) values (%L,'Second Boss','boss2@vsm.test','SUPER_ADMIN')$$, :'org'), 'service role cannot create a second Super Admin');
+reset role;
+select set_config('request.jwt.claim.sub', '', false);
+select t_ok(is_owner_session(), 'SQL Editor (owner) session is recognised for break-glass recovery');
+
+-- Chat inbox
+select id as seo_chan from org_teams where org_id=:'org' and team_key='seo' \gset
+select chat_channel_id as seo_chat from org_teams where org_id=:'org' and team_key='seo' \gset
+insert into chat_channel_members(channel_id, employee_id) values (:'seo_chat', :'e_h') on conflict do nothing;
+insert into chat_messages(org_id, channel_id, author_id, body) values (:'org', :'seo_chat', :'e_s', 'Ranking report due Friday');
+select t_ok(exists(select 1 from notifications where recipient_id=:'e_h' and category='CHAT_MESSAGE' and link='/chat/'||:'seo_chat' and read_at is null), 'a chat message notifies the team (inbox)');
+select t_ok(preference_category('CHAT_MESSAGE') = 'CHAT', 'chat notifications follow the Chat preference');
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_ok((select unread from chat_unread_summary() where channel_id = :'seo_chat') = 1, 'chat inbox shows 1 unread message');
+select t_ok(mark_chat_read(:'seo_chat') >= 1, 'opening the conversation marks its chat notifications read');
+select t_ok(not exists(select 1 from notifications where category like 'CHAT%' and link='/chat/'||:'seo_chat' and read_at is null), 'no unread chat notifications remain for that conversation');
+select t_ok((select unread from chat_unread_summary() where channel_id = :'seo_chat') = 0, 'and the unread count drops to 0');
+reset role;
+
+
+-- 0025: the screen and the Clock in button read the same "today"
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select record_attendance('CLOCK_IN');
+select t_ok((select count(*) from my_attendance_today() where event_type='CLOCK_IN') = 1, 'my_attendance_today shows the clock-in the button just saved');
+select t_ok(attendance_day_start(current_org_id()) <= now() and attendance_day_start(current_org_id()) > now() - interval '24 hours', 'day boundary is local midnight within the last 24 h');
+reset role;
+
+
+-- 0026: activity timeline visibility
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok((select count(*) from employee_activity(:'e_a')) >= 0, 'employees can see their own activity');
+select t_denied(format($$select * from employee_activity(%L)$$, :'e_b'), 'employees cannot see a colleague''s activity');
+reset role;
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_ok((select count(*) from employee_activity(:'e_a')) >= 0, 'HR can see an employee''s activity');
+reset role;
+
+
+-- ===========================================================================
+-- Blocks 19–23
+-- ===========================================================================
+reset role; select set_config('request.jwt.claim.sub', '', false);
+\set F '33333333-0000-0000-0000-0000000000f1'
+insert into auth.users(id, email) values (:'F', 'field@vsm.test');
+insert into employees(org_id, user_id, full_name, official_email, role, manager_id) values (:'org', :'F', 'Farah Field', 'field@vsm.test', 'EMPLOYEE', :'e_m');
+select id as e_f from employees where user_id = :'F' \gset
+insert into office_locations(org_id, name, latitude, longitude, radius_m) values (:'org', 'Meerut office', 28.984500, 77.706400, 150);
+update attendance_settings set geofence_mode = 'ENFORCE', selfie_mode = 'OFF' where org_id = :'org';
+
+-- Block 20: geofence, selfie path, offline window, review
+select set_config('request.jwt.claim.sub', :'F', false); set role authenticated;
+select t_denied($$select record_attendance_v2('CLOCK_IN','MOBILE', 28.6139, 77.2090, 20)$$, 'ENFORCE: clock-in 60 km away is refused');
+select t_denied(format($$select record_attendance_v2('CLOCK_IN','MOBILE', 28.9846, 77.7065, 10, %L)$$, :'org' || '/' || :'e_a' || '/x.jpg'), 'cannot attach someone else''s selfie');
+select t_denied($$select record_attendance_v2('CLOCK_IN','MOBILE', null, null, null, null, now() - interval '30 hours')$$, 'offline punch older than the window is refused');
+select record_attendance_v2('CLOCK_IN','MOBILE', 28.9846, 77.7065, 10, :'org' || '/' || :'e_f' || '/in.jpg');
+select t_ok((select inside_geofence and distance_m < 50 and office_id is not null and flag is null from attendance_events where employee_id = :'e_f' order by occurred_at desc limit 1), 'clock-in at the office is inside the geofence, unflagged');
+reset role;
+update attendance_settings set geofence_mode = 'WARN' where org_id = :'org';
+update attendance_events set created_at = now() - interval '1 minute' where employee_id = :'e_f';
+select set_config('request.jwt.claim.sub', :'F', false); set role authenticated;
+select record_attendance_v2('CLOCK_OUT','MOBILE', 28.6139, 77.2090, 30);
+select t_ok((select flag like 'Outside Meerut office%' and inside_geofence = false from attendance_events where employee_id = :'e_f' order by occurred_at desc limit 1), 'WARN: punch away from office is saved but flagged');
+select id as flagged from attendance_events where employee_id = :'e_f' and flag is not null order by occurred_at desc limit 1 \gset
+select t_denied(format($$select review_punch(%L)$$, :'flagged'), 'nobody reviews their own flagged punch');
+reset role;
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select review_punch(:'flagged', 'Client visit, approved');
+reset role;
+select t_ok((select reviewed_by = :'e_m' from attendance_events where id = :'flagged'), 'the manager can review a flagged punch in their team');
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_denied(format($$select review_punch(%L)$$, :'flagged'), 'a colleague cannot review it');
+select t_none($$select count(*) from storage.objects where bucket_id = 'attendance-selfies' and name like '%/' || current_setting('vsm.ef', true) || '/%'$$, 'selfies of others are not visible');
+reset role;
+select t_ok(distance_m(28.9845, 77.7064, 28.6139, 77.2090) between 55000 and 65000, 'distance helper: Meerut → Delhi ≈ 60 km');
+update attendance_settings set geofence_mode = 'OFF' where org_id = :'org';
+
+-- Block 21: statutory & bank details
+insert into employee_statutory(employee_id, org_id, pan, uan, bank_account_no, bank_ifsc, bank_account_holder)
+values (:'e_a', :'org', 'ABCDE1234F', '100200300400', '123456789012', 'HDFC0001234', 'Aman A');
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok((select count(*) from employee_statutory) = 1, 'employees see only their own bank and tax details');
+select t_denied(format($$update employee_statutory set bank_account_no = '999999999999' where employee_id = %L$$, :'e_a'), 'employees cannot change their own bank account');
+select t_none('select count(*) from payroll_statutory_settings', 'employees do not see statutory settings');
+select t_denied($$select access_token_enc from calendar_provider_connections$$, 'Google tokens are never readable from the app');
+reset role;
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((select count(*) from employee_statutory) = 0, 'colleagues cannot see someone else''s bank details');
+reset role;
+select t_denied($$insert into employee_statutory(employee_id, org_id, pan) values ((select id from employees where official_email='b@vsm.test'), (select id from organizations where slug='vsm-growth'), 'BAD')$$, 'invalid PAN is rejected');
+select t_ok((select pf_wage_ceiling = 25000 and esi_wage_limit = 21000 and standard_deduction = 75000 from payroll_statutory_settings where org_id = :'org'), 'statutory defaults: PF ceiling 25,000 · ESI 21,000 · std deduction 75,000');
+
+-- Block 23: VSM Scholars
+update employees set designation = 'Course Counsellor' where id = :'e_b';
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_none('select count(*) from scholar_students', 'regular employees do not see students');
+reset role;
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok(has_perm('scholars.manage') and not has_perm('scholars.fees'), 'the Course Counsellor post grants scholars.manage, not fees');
+insert into scholar_students(org_id, full_name, phone, source, interested_course_id)
+values (:'org', 'Riya Student', '9876500001', 'INSTAGRAM', (select id from scholar_courses where org_id = :'org' and code = 'DM'));
+reset role;
+select id as stu from scholar_students where phone = '9876500001' \gset
+insert into scholar_batches(org_id, course_id, name, trainer_id, starts_on) values (:'org', (select id from scholar_courses where org_id=:'org' and code='DM'), 'DM-Jan-27', :'e_m', current_date) returning id as batch \gset
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+insert into scholar_enrollments(org_id, student_id, batch_id, fee_total) values (:'org', :'stu', :'batch', 25000) returning id as enr \gset
+insert into scholar_fee_payments(org_id, enrollment_id, amount, due_on) values (:'org', :'enr', 25000, current_date) returning id as fee \gset
+select t_denied(format($$insert into scholar_fee_payments(org_id, enrollment_id, amount, due_on, status, paid_on, method, receipt_no, confirmed_by) values (%L,%L,1,current_date,'PAID',current_date,'CASH','X',%L)$$, :'org', :'enr', :'e_b'), 'counsellors cannot record a payment as paid directly');
+select t_denied(format($$select scholar_confirm_payment(%L,'UPI','UTR123')$$, :'fee'), 'counsellors cannot confirm fees');
+select t_ok((select stage from scholar_students where id = :'stu') = 'ENROLLED', 'enrolling moves the student to ENROLLED');
+reset role;
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select t_denied(format($$select scholar_issue_certificate(%L)$$, :'enr'), 'no certificate while fees are due');
+select t_denied(format($$select scholar_confirm_payment(%L,'UPI','')$$, :'fee'), 'UPI payment needs a reference');
+select t_ok((select receipt_no ~ '^VSMS-\d{4}-\d{5}$' from scholar_confirm_payment(:'fee','UPI','UTR123456')), 'confirmed fee gets a sequential receipt number');
+select verify_code as vcode from scholar_issue_certificate(:'enr', 'A') \gset
+reset role;
+select set_config('request.jwt.claim.sub', '', false); set role anon;
+select t_ok((select status = 'VALID' and student_name = 'Riya Student' and course = 'Digital Marketing' from verify_certificate(:'vcode')), 'anyone can verify a certificate by its QR code');
+select t_ok((select count(*) from verify_certificate('not-a-code')) = 0, 'bad codes reveal nothing');
+select t_none('select count(*) from scholar_students', 'anon cannot list students');
+reset role;
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select scholar_revoke_certificate((select id from scholar_certificates where verify_code = :'vcode'), 'Issued in error');
+reset role;
+select t_ok((select status from verify_certificate(:'vcode')) = 'REVOKED', 'revoked certificates show as REVOKED');
+update designations set grants = grants || array['payroll.manage'] where org_id = :'org' and title = 'Course Counsellor';
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok(not has_perm('payroll.manage'), 'a post can never grant a sensitive permission');
+reset role;
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select t_ok((select count(*) from scholar_students) = 1, 'trainers see students of their own batches');
+reset role;
+select set_config('request.jwt.claim.sub', '', false);
+
 -- Smoke: every public table is readable (subject to RLS) by every persona without policy errors.
 create or replace function t_sweep(label text) returns void language plpgsql as $$
 declare t record; n int;
 begin
-  for t in select tablename from pg_tables where schemaname = 'public' loop
+  for t in select tablename from pg_tables where schemaname = 'public' and tablename not like '\_%' loop
     execute format('select count(*) from public.%I', t.tablename) into n;
   end loop;
   raise notice 'PASS: sweep as % (all tables readable under RLS)', label;

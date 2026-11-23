@@ -12,6 +12,7 @@ export async function GET(req: NextRequest) {
     const { data: built, error } = await supabaseAdmin().rpc("build_daily_digests");
     if (error) throw new Error(error.message);
     const sent = await drainOutbox(100);
+    await supabaseAdmin().rpc("ops_housekeeping"); // prune old error logs and rate-limit rows
     await cronHeartbeat(true);
     return NextResponse.json({ digests: built, ...sent });
   } catch (e) {

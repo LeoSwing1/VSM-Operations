@@ -4,7 +4,7 @@ OPDesk is the internal operating system for **VSM Growth** and **VSM Scholars**.
 
 **Current stack:** Next.js 15 App Router · React 19 · TypeScript · Supabase PostgreSQL/Auth/Storage/RLS · Brevo (Resend optional) · Vercel.
 
-> **Development status:** Block 01 established the core operating platform; Block 02 added recruitment and the employee lifecycle foundation; Block 03 adds confidential employee document storage, probation review decisions and exit-clearance workflows; Block 04 adds the Finance ERP vertical slice (expenses, approvals, payments, vendors, invoices, budgets, reconciliation and CSV reports); Block 05 makes this the central VSM operations portal with project workspaces, delivery milestones, time approvals, team chat, direct messages, attachments and announcements; Block 06 hardens chat membership, reporting/moderation and role permission governance. Database migrations and the production build must pass the validation gates below before deploying a block. A source implementation is not considered production-ready until its database and security tests pass.
+> **Development status:** Block 01 established the core operating platform; Block 02 added recruitment and the employee lifecycle foundation; Block 03 adds confidential employee document storage, probation review decisions and exit-clearance workflows; Block 04 adds the Finance ERP vertical slice (expenses, approvals, payments, vendors, invoices, budgets, reconciliation and CSV reports); Block 05 makes this the central VSM operations portal with project workspaces, delivery milestones, time approvals, team chat, direct messages, attachments and announcements; Block 06 hardens chat membership, reporting/moderation and role permission governance. Database migrations and the production build must pass the validation gates below before deploying a block. Blocks 07–14 add executive reporting, workforce collaboration, advanced calendar/time-quality exports, workflow automation, the Super Admin console, Integration Control Centre and real-time chat/notification infrastructure. Block 14 adds migration 0019. A source implementation is not considered production-ready until its database and security tests pass.
 
 ## Start here
 
@@ -33,9 +33,9 @@ OPDesk is the internal operating system for **VSM Growth** and **VSM Scholars**.
 | Tasks & productivity | Assignment, workflow, deadlines, quality review, daily updates; project time logs in Block 05 | Subtasks, task attachments, recurring work, dependencies and full activity timeline |
 | Performance | Configurable weighted scoring, review snapshots and manager feedback | Review cycles, self-assessment and richer analytics |
 | CRM & clients | Public enquiry intake, dedupe, lead pipeline and assignment | Client 360, contracts, account activity and sales analytics |
-| Communication | Blocks 05–06: direct/group chat, public/department/project channels, replies, reactions, private attachments, read receipts, reports, moderation queue, controlled membership, channel archive/leave and moderation audit; chat refreshes every 4 seconds | WebSocket push, typing/presence, mobile push, retention/legal hold and abuse analytics |
+| Communication | Blocks 05–06: direct/group chat, public/department/project channels, replies, reactions, private attachments, read receipts, reports, moderation queue, controlled membership, channel archive/leave and moderation audit; private Supabase Realtime subscriptions for messages/reactions, presence, typing, channel-level read receipts, live unread counts and opt-in browser desktop alerts | Web Push/mobile push, offline queue, retention/legal hold and abuse analytics |
 | Reports & analytics | Attendance/payroll report foundations | Central report builder, exports and department/project analytics |
-| Settings & integrations | Role/permission matrix, hierarchy, audit log, integration settings | Integration health, retries, webhook management and incident/SLA views |
+| Settings & integrations | Role/permission matrix, hierarchy, audit log, Integration Control Centre with live database/Storage/Auth/Realtime checks, OAuth readiness, cron heartbeat, email outbox and diagnostic history | External webhook management, incident/SLA views and additional provider integrations |
 
 The original master specification remains the source of truth for scope. See the integration audit for item-by-item mapping; update it whenever a module's status changes.
 
@@ -299,9 +299,9 @@ Block 06 hardens the Block 05 communication system and extends the existing role
 - Channel membership mutations use `manage_chat_member` (SECURITY DEFINER with organisation, actor, channel and target validation). Direct membership table writes are revoked; authenticated self-join remains limited to public channels and the caller's own department channel. Direct-message membership is immutable.
 - Channel owners and authorized channel administrators can add/remove members and assign moderator roles; channel owners cannot be removed or self-demoted. Members can leave non-DM channels. Channel archive uses `archive_chat_channel`.
 - Message moderation uses `moderate_chat_message`; report review uses `review_chat_report`. Sensitive actions are written to `chat_moderation_events`. Role matrix, hierarchy and personal override changes continue to use the existing audit triggers in migrations 0001/0006.
-- Chat message access remains membership-gated and private files remain in the `chat-files` bucket with short-lived signed URLs. Message refresh is still four-second polling; WebSocket delivery, presence/typing, mobile push and retention/legal-hold automation are not implemented.
+- Chat message access remains membership-gated and private files remain in the `chat-files` bucket with short-lived signed URLs. At the Block 06 stage, message refresh used four-second polling; Block 14 later supersedes this with private Realtime subscriptions, presence and typing. Mobile push and retention/legal-hold automation remain outstanding.
 
-Migration: `0012_chat_security_access_controls.sql`. New organizations also receive the communication administration permissions through the organization bootstrap trigger. Apply migrations 0001–0013 in order.
+Migration: `0012_chat_security_access_controls.sql`. New organizations also receive the communication administration permissions through the organization bootstrap trigger. Apply migrations 0001–0018 in order.
 
 **Important validation boundary:** this block is source-implemented. The SQL migration, TypeScript build, RLS suite and production deployment must still be verified in a dependency-enabled environment against a scratch Supabase-compatible database. No production Supabase data or Vercel deployment was changed.
 
@@ -333,3 +333,55 @@ Adds a permission-gated executive overview with date filters, workforce, deliver
 ## Block 08 — Workforce operations and collaboration
 
 Block 08 adds effective-dated shift scheduling integrated into attendance calculations, formal teams and private working groups, task/project timesheets with approval and CSV export, independent quality assessments, calendar events and meeting invitations, attendee responses, meeting agendas/minutes/decisions/action items, and in-app meeting invitation notifications. See [`docs/blocks/BLOCK-08.md`](docs/blocks/BLOCK-08.md) for permissions, migration, implementation boundaries and verification requirements.
+
+## Block 09 — Advanced calendar, attendance, evidence & exports
+
+Block 09 adds full month/week/day calendar views, bounded recurring meeting series, queued email invitations, Google Calendar and Microsoft Outlook OAuth sync, mobile-friendly attendance punch controls, task timer sessions, private quality evidence uploads, and CSV/XLSX/PDF/ICS exports. See `docs/blocks/BLOCK-09.md` for configuration, limits and operational boundaries. Apply migration `0015_advanced_calendar_time_quality_exports.sql` after Block 08.
+
+## Block 10 — Workflow Automation & SLA Foundation
+
+Adds tenant-scoped workflow rules, idempotent event enqueueing, durable execution logs, concurrency-safe worker claiming, bounded retries and service-role-only worker completion. See `docs/blocks/BLOCK-10.md` for implementation boundaries and rollout notes.
+
+## 20. Super Admin console, access matrix and chat workspace (Block 12)
+
+Block 12 adds a dedicated `/settings/admin` Super Admin console with live organisation-scoped role, permission-grant and employee counts plus shortcuts to governance tools. `/settings/access` is presented as **Roles & Permissions**, with authority/persistence summary cards and a compact role-by-permission switch matrix. The existing hierarchy, sensitive-grant restrictions, save action, RLS and audit behavior remain authoritative.
+
+The chat landing page is now an inbox-style workspace for joined conversations, discoverable channels, direct messages and channel creation. Message bubbles distinguish the current user from other participants and retain replies, reactions, reporting and attachment links. At the Block 12 delivery stage, chat still used authenticated four-second polling; Block 14 supersedes that transport with private Realtime subscriptions, presence, typing and live unread notification updates. Web Push and native mobile push remain outstanding. See `docs/blocks/BLOCK-12.md` for validation and boundaries.
+
+
+## 21. Integration Control Centre (Block 13)
+
+Block 13 upgrades `/settings/integrations` into the organisation-scoped Integration Control Centre. Administrators with `settings.manage` can run real database, Storage bucket, Supabase Auth Admin and Realtime channel checks. Results include latency and diagnostic history in `integration_check_runs` (migration 0018). The page distinguishes calendar OAuth credentials from linked provider accounts and sync errors, surfaces cron heartbeat and email outbox health, and labels future providers as not integrated until implemented. A passing Realtime handshake verifies the transport only; chat still uses polling until a later realtime-chat block. See `docs/blocks/BLOCK-13.md` and the Block 13 section in `RUNBOOK.md`.
+
+## Block 14 — Real-time chat and notification infrastructure
+
+Block 14 adds private Supabase Realtime chat topics with membership-based topic authorization, message/reaction subscriptions, online presence, typing indicators, channel read receipts, live unread notification counts, in-app notification toasts and opt-in browser desktop alerts. Apply `supabase/migrations/0019_realtime_chat_notifications.sql` before deploying. Desktop alerts use the browser Notification API while OPDesk is open; they are not Web Push or native mobile push.
+
+See [`docs/blocks/BLOCK-14.md`](docs/blocks/BLOCK-14.md) for deployment checks, security boundaries and remaining work.
+
+
+## Block 15 — Business workflow automation & SLA execution
+
+Block 15 wires leave, timesheet and quality business events; adds scheduled task deadline, pending-timesheet and incomplete-attendance scans; and adds validated event-target notification routing. See `docs/blocks/BLOCK-15.md`. Apply migration `0020_business_workflow_sla_execution.sql` before deployment.
+
+## Block 16 — Advanced workflow approvals
+- Adds typed manager notifications and manager-routed approval actions, durable approval cases, an Approvals inbox decision flow, and bounded manager-chain escalation.
+- Apply `supabase/migrations/0021_advanced_workflow_approvals.sql` before deploying.
+- Approval routing requires employee `manager_id` relationships; escalation is capped at three hops with a 24-hour follow-up window.
+- See `docs/blocks/BLOCK-16.md` for security boundaries and remaining limitations.
+
+## Block 17 — Integrations, instant permissions, Operations Center, animated login
+- Repairs the Block 16 audit blockers: build, migrations 0009/0010/0014 via `0022`, authenticated realtime, CSV hardening, tests.
+- Adds WhatsApp, web push, Slack/Teams, signed outbound webhooks, Meta Lead Ads and Razorpay inbound, and anonymous analytics (`0023`). Everything goes through a durable outbox; no amounts ever leave the app.
+- Adds the OPDesk-style instant-save Roles & Permissions matrix, the `/operations` Operations Center, and the animated VSM login.
+- See `docs/blocks/BLOCK-17.md` for what to run on live and what was verified.
+
+## Block 18 — Chat & Windows notifications, live sync & clock, posts/teams, demo team, passwords, protected Super Admin, Docker
+- Live chat inbox badge and Windows desktop/push notifications, an installable app, and live sync on key pages.
+- A clock that ticks from the second you clock in.
+- Automatic employee IDs; company posts → departments → SEO/Editing/Developers teams → chat groups.
+- A one-click demo team of 5, per-employee password reset, a `/status` connection test, and exactly one Super Admin that nobody can remove.
+- Local Docker stack: `./scripts/local-up.ps1 -Email you@vsmgrowth.com`. See `docs/blocks/BLOCK-18.md`.
+
+## Blocks 19–23
+Hardening (error log, rate limits, CI, Playwright), field attendance (geofence, selfie, offline), Indian payroll (PF/ESI/PT/TDS, payslip PDF, bank file, Form 16 data, RazorpayX confirmation), Google Workspace (two-way Calendar, Drive, Gmail) and VSM Scholars (pipeline, batches, fees, receipts, QR-verified certificates). See `docs/blocks/BLOCKS-19-23.md`.

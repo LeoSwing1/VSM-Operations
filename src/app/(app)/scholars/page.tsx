@@ -1,122 +1,156 @@
-import { requireContext } from "@/lib/auth";
-import { supabaseServer } from "@/lib/supabase/server";
-import { Card, Flash, PageHeader } from "@/components/ui";
 import Link from "next/link";
-import { PlusIcon } from "lucide-react";
+import { redirect } from "next/navigation";
+import { canAny, requireContext } from "@/lib/auth";
+import { supabaseServer } from "@/lib/supabase/server";
+import { Badge, Card, PageHeader, Stat, Flash } from "@/components/ui";
+import { fmtDate, fmtDateTime } from "@/lib/engines/time";
+import { LiveSync } from "@/components/live-sync";
+import { ScholarsNav, STAGES, STAGE_TONE, rupees } from "./nav";
 
 export const metadata = { title: "VSM Scholars" };
 
-export default async function ScholarsPage({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
+export default async function Scholars({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
   const sp = await searchParams;
   const ctx = await requireContext();
+  if (!canAny(ctx, ["scholars.view", "scholars.teach"]))
+    redirect("/dashboard?e=" + encodeURIComponent("VSM Scholars isn't part of your access."));
   const sb = await supabaseServer();
-
-  // Get scholar batches
-  const { data: batches } = await sb.from("scholar_batches")
-    .select(`
-      id,
-      name,
-      description,
-      start_date,
-      end_date,
-      is_active,
-      count:scholars
-    `)
-    .order("start_date", { ascending: true });
-
-  // Get scholar applications (for team leads and above)
-  const { data: applications } = await sb.from("scholars")
-    .select(`
-      id,
-      application_status,
-      created_at,
-      applicant:employees!inner(full_name, email, profile_image_url)
-    `)
-    .in("application_status", ["APPLIED", "SCREENING", "INTERVIEW", "SELECTED", "WITHDRAWN"])
-    .order("created_at", { ascending: true })
-    .limit(20);
-
-  const statusColors = {
-    APPLIED: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
-    SCREENING: "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200",
-    INTERVIEW: "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200",
-    SELECTED: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200",
-    ONBOARDING: "bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200",
-    ACTIVE: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200",
-    ALUMNI: "bg-slate-100 text-slate-800 dark:bg-slate-900 dark:text-slate-200",
-    WITHDRAWN: "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200",
-  };
-
+  const today = new Date().toISOString().slice(0, 10);
+  const [{ data: students }, { data: batches }, { data: fees }, { count: certs }, { data: due }] = await Promise.all([
+    sb.from("scholar_students").select("stage").limit(10000),
+    sb
+      .from("scholar_batches")
+      .select(
+        "id, name, status, capacity, starts_on, schedule, course:scholar_courses(name), trainer:employees(full_name), seats:scholar_enrollments(count)",
+      )
+      .in("status", ["PLANNED", "RUNNING"])
+      .order("starts_on"),
+    sb.from("scholar_fee_payments").select("amount, status, due_on").limit(10000),
+    sb.from("scholar_certificates").select("id", { count: "exact", head: true }).is("revoked_at", null),
+    sb
+      .from("scholar_students")
+      .select("id, full_name, phone, stage, next_follow_up_at")
+      .lte("next_follow_up_at", new Date(Date.now() + 86400_000).toISOString())
+      .in("stage", ["ENQUIRY", "COUNSELLED", "DEMO"])
+      .order("next_follow_up_at")
+      .limit(12),
+  ]);
+  const by = (s: string) => (students ?? []).filter((x) => x.stage === s).length;
+  const sum = (f: (r: { amount: number; status: string; due_on: string }) => boolean) =>
+    (fees ?? []).filter(f).reduce((a, r) => a + Number(r.amount), 0);
+  const overdue = sum((r) => r.status === "DUE" && r.due_on < today),
+    dueSoon = sum((r) => r.status === "DUE" && r.due_on >= today);
+  const collected = sum((r) => r.status === "PAID");
+  const leads = by("ENQUIRY") + by("COUNSELLED") + by("DEMO");
+  const conv =
+    leads + by("ENROLLED") + by("ALUMNI") + by("LOST")
+      ? Math.round(((by("ENROLLED") + by("ALUMNI")) / (leads + by("ENROLLED") + by("ALUMNI") + by("LOST"))) * 100)
+      : 0;
   return (
     <>
-      <PageHeader title="VSM Scholars" />
+      <PageHeader eyebrow="Digital Marketing · Graphic Design · Video Editing" title="VSM Scholars">
+        {canAny(ctx, ["scholars.manage"]) && (
+          <Link href="/scholars/students?new=1" className="btn-primary">
+            New enquiry
+          </Link>
+        )}
+      </PageHeader>
+      <ScholarsNav active="/scholars" />
+      <LiveSync tables={["scholar_students", "scholar_enrollments", "scholar_fee_payments"]} />
       <Flash sp={sp} />
-
-      {(!batches || batches.length === 0) && (!applications || applications.length === 0) ? (
-        <Card>
-          <p className="text-muted">No scholar data found.</p>
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
+        <Stat label="Open enquiries" value={leads} />
+        <Stat label="Enrolled now" value={by("ENROLLED")} tone="volt" />
+        <Stat label="Alumni" value={by("ALUMNI")} />
+        <Stat label="Conversion" value={`${conv}%`} />
+        <Stat label="Fees collected" value={rupees(collected)} />
+        <Stat label="Overdue fees" value={rupees(overdue)} tone={overdue ? "danger" : undefined} />
+      </div>
+      <div className="mt-6 grid gap-6 xl:grid-cols-[1.2fr_1fr]">
+        <Card title="Counselling pipeline">
+          <div className="grid grid-cols-7 gap-2 text-center">
+            {STAGES.map((s) => (
+              <Link key={s} href={`/scholars/students?stage=${s}`} className="rounded-xl border border-line p-2 hover:border-volt/50">
+                <p className="display text-2xl tabular-nums">{by(s)}</p>
+                <p className="text-[9px] uppercase text-muted">{s.toLowerCase()}</p>
+              </Link>
+            ))}
+          </div>
+          <h3 className="eyebrow mb-2 mt-6">Follow up today</h3>
+          {!due?.length ? (
+            <p className="text-sm text-muted">No follow-ups due. 🎯</p>
+          ) : (
+            <ul className="divide-y divide-line text-sm">
+              {due.map((s) => (
+                <li key={s.id} className="flex items-center justify-between gap-2 py-2">
+                  <Link href={`/scholars/students/${s.id}`} className="hover:text-volt">
+                    {s.full_name} <span className="text-xs text-muted">· {s.phone}</span>
+                  </Link>
+                  <span className="flex items-center gap-2">
+                    <Badge tone={STAGE_TONE[s.stage]}>{s.stage}</Badge>
+                    <span className={`text-xs ${s.next_follow_up_at! < new Date().toISOString() ? "text-ember" : "text-muted"}`}>
+                      {fmtDateTime(s.next_follow_up_at!, ctx.timezone)}
+                    </span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </Card>
-      ) : (
-        <div className="grid gap-6">
-          {batches && batches.length > 0 && (
-            <>
-              <h2 className="text-sm font-medium">Scholar Batches</h2>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {batches.map((batch) => (
-                  <Card key={batch.id} className="hover:border-ink/30 transition">
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <h3 className="font-medium text-sm line-clamp-1">{batch.name}</h3>
-                        <p className="text-xs text-muted mt-1 line-clamp-2">
-                          {batch.description || "No description"}
-                        </p>
-                      </div>
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${batch.is_active ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200" : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200"}`}>
-                        {batch.is_active ? "Active" : "Inactive"}
-                      </span>
-                    </div>
-                    <div className="mt-3 text-xs">
-                      <span className="text-muted">
-                        {batch.start_date ? new Date(batch.start_date).toLocaleDateString() : "Start"} -{" "}
-                        {batch.end_date ? new Date(batch.end_date).toLocaleDateString() : "End"}
-                      </span>
-                      <span className="ml-3 text-muted">• {batch.count}</span>
-                    </div>
-                  </Card>
-                ))}
-              </div>
-            </>
-          )}
-
-          {applications && applications.length > 0 && (
-            <>
-              <h2 className="text-sm font-medium">Recent Applications</h2>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {applications.map((app) => (
-                  <Card key={app.id}>
-                    <Link href={`/scholars/${app.id}`} className="flex gap-3">
-                      {app.applicant?.[0]?.profile_image_url ? (
-                        <img src={app.applicant[0].profile_image_url} alt={app.applicant[0].full_name || ""} className="h-10 w-10 rounded-full object-cover" />
-                      ) : (
-                        <div className="h-10 w-10 rounded-full bg-volt flex items-center justify-center text-sm font-bold">
-                          {app.applicant?.[0]?.full_name?.[0] || "?"}
-                        </div>
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <h3 className="font-medium text-sm line-clamp-1">{app.applicant?.[0]?.full_name || ""}</h3>
-                        <p className="text-xs text-muted line-clamp-1">{app.applicant?.[0]?.email || ""}</p>
-                        <span className={`mt-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${statusColors[app.application_status as keyof typeof statusColors] || statusColors.APPLIED}`}>
-                          {app.application_status}
+        <Card
+          title="Open batches"
+          action={
+            <Link href="/scholars/batches" className="text-xs text-volt hover:underline">
+              All →
+            </Link>
+          }
+        >
+          {!batches?.length ? (
+            <p className="text-sm text-muted">No planned or running batches.</p>
+          ) : (
+            <ul className="space-y-3 text-sm">
+              {batches.map(
+                (b: {
+                  id: string;
+                  name: string;
+                  status: string;
+                  capacity: number;
+                  starts_on: string;
+                  schedule: string | null;
+                  course: unknown;
+                  trainer: unknown;
+                  seats: { count: number }[];
+                }) => {
+                  const seats = b.seats?.[0]?.count ?? 0;
+                  return (
+                    <li key={b.id}>
+                      <Link href={`/scholars/batches/${b.id}`} className="flex items-center justify-between gap-2 hover:text-volt">
+                        <span>
+                          <b>{b.name}</b>{" "}
+                          <span className="text-xs text-muted">
+                            · {(b.course as { name: string } | null)?.name} ·{" "}
+                            {(b.trainer as { full_name: string } | null)?.full_name ?? "no trainer"} · from {fmtDate(b.starts_on)}
+                          </span>
                         </span>
-                      </div>
-                    </Link>
-                  </Card>
-                ))}
-              </div>
-            </>
+                        <Badge tone={b.status === "RUNNING" ? "green" : "amber"}>{b.status}</Badge>
+                      </Link>
+                      <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-line">
+                        <span className="block h-full bg-volt" style={{ width: `${Math.min(100, (seats / b.capacity) * 100)}%` }} />
+                      </span>
+                      <span className="text-[11px] text-muted">
+                        {seats}/{b.capacity} seats{b.schedule ? ` · ${b.schedule}` : ""}
+                      </span>
+                    </li>
+                  );
+                },
+              )}
+            </ul>
           )}
-        </div>
-      )}
+          <p className="mt-4 text-xs text-muted">
+            {certs ?? 0} valid certificates issued · {rupees(dueSoon)} due in coming instalments
+          </p>
+        </Card>
+      </div>
     </>
   );
 }

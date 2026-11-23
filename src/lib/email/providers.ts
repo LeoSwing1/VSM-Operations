@@ -1,23 +1,35 @@
 import "server-only";
 /**
- * Email providers. Choose with EMAIL_PROVIDER=brevo | resend (default: brevo if BREVO_API_KEY is set, else resend).
+ * Email providers. Choose with EMAIL_PROVIDER=brevo | resend | gmail (default: brevo if BREVO_API_KEY is set, else resend).
  * Both receive the same message; the outbox worker owns retries, dedupe and status.
  */
 export interface OutgoingEmail {
-  from: string;            // "VSM Growth <ops@mail.vsmgrowth.com>"
+  from: string; // "VSM Growth <ops@mail.vsmgrowth.com>"
   to: string;
   subject: string;
   html: string;
   text: string;
   replyTo?: string;
   tags?: string[];
-  refId: string;           // outbox row id — used for idempotency/tracing
+  refId: string; // outbox row id — used for idempotency/tracing
 }
-export interface SendResult { messageId: string | null }
+export interface SendResult {
+  messageId: string | null;
+}
 export class EmailError extends Error {
-  constructor(message: string, public permanent: boolean, public status?: number) { super(message); this.name = "EmailError"; }
+  constructor(
+    message: string,
+    public permanent: boolean,
+    public status?: number,
+  ) {
+    super(message);
+    this.name = "EmailError";
+  }
 }
-export interface EmailProvider { name: "brevo" | "resend"; send(m: OutgoingEmail): Promise<SendResult> }
+export interface EmailProvider {
+  name: "brevo" | "resend" | "gmail";
+  send(m: OutgoingEmail): Promise<SendResult>;
+}
 
 /** "Name <a@b.com>" | "a@b.com" → { name, email } */
 export function parseAddress(raw: string): { name?: string; email: string } {
@@ -75,8 +87,18 @@ export async function resendProvider(apiKey: string): Promise<EmailProvider> {
   return {
     name: "resend",
     async send(m) {
-      const r = await client.emails.send({ from: m.from, to: m.to, subject: m.subject, html: m.html, text: m.text,
-        replyTo: m.replyTo, headers: { "X-Entity-Ref-ID": m.refId } }, { idempotencyKey: `outbox-${m.refId}` });
+      const r = await client.emails.send(
+        {
+          from: m.from,
+          to: m.to,
+          subject: m.subject,
+          html: m.html,
+          text: m.text,
+          replyTo: m.replyTo,
+          headers: { "X-Entity-Ref-ID": m.refId },
+        },
+        { idempotencyKey: `outbox-${m.refId}` },
+      );
       if (r.error) {
         const permanent = /validation|invalid|not.?allowed|restricted|missing/i.test(r.error.name + r.error.message);
         throw new EmailError(`Resend: ${r.error.message}`, permanent);
@@ -91,5 +113,21 @@ export async function getProvider(env = process.env): Promise<EmailProvider | nu
   const choice = (env.EMAIL_PROVIDER ?? (env.BREVO_API_KEY ? "brevo" : "resend")).toLowerCase();
   if (choice === "brevo") return env.BREVO_API_KEY ? brevoProvider(env.BREVO_API_KEY) : null;
   if (choice === "resend") return env.RESEND_API_KEY ? resendProvider(env.RESEND_API_KEY) : null;
+  if (choice === "gmail") {
+    // Google Workspace: send through the connected company Gmail account (Settings → Integrations → Google).
+    const { gmailSenderConnection, sendViaGmail } = await import("@/lib/google/gmail");
+    if (!(await gmailSenderConnection())) return null;
+    return {
+      name: "gmail",
+      async send(m) {
+        try {
+          return await sendViaGmail(m);
+        } catch (e) {
+          const msg = (e as Error).message;
+          throw new EmailError(msg, /\b(400|403)\b/.test(msg));
+        }
+      },
+    };
+  }
   return null;
 }

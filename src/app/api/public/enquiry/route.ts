@@ -9,20 +9,30 @@ import { drainOutbox } from "@/lib/email/worker";
  * Order of operations: validate → rate-limit → PERSIST lead (+ queued emails) → best-effort send.
  * An email failure can never lose the enquiry.
  */
-const Enquiry = z.object({
-  name: z.string().trim().min(2).max(120),
-  email: z.string().trim().email().max(200).optional().or(z.literal("")),
-  phone: z.string().trim().regex(/^[0-9+\-\s()]{7,20}$/).optional().or(z.literal("")),
-  company: z.string().trim().max(160).optional(),
-  service: z.string().trim().max(120).optional(),
-  message: z.string().trim().max(5000).optional(),
-  kind: z.enum(["contact", "project"]).default("contact"),
-  page: z.string().trim().max(300).optional(),
-  website: z.string().max(0).optional(),               // honeypot — must stay empty
-}).refine((v) => v.email || v.phone, { message: "Email or phone is required" });
+const Enquiry = z
+  .object({
+    name: z.string().trim().min(2).max(120),
+    email: z.string().trim().email().max(200).optional().or(z.literal("")),
+    phone: z
+      .string()
+      .trim()
+      .regex(/^[0-9+\-\s()]{7,20}$/)
+      .optional()
+      .or(z.literal("")),
+    company: z.string().trim().max(160).optional(),
+    service: z.string().trim().max(120).optional(),
+    message: z.string().trim().max(5000).optional(),
+    kind: z.enum(["contact", "project"]).default("contact"),
+    page: z.string().trim().max(300).optional(),
+    website: z.string().max(0).optional(), // honeypot — must stay empty
+  })
+  .refine((v) => v.email || v.phone, { message: "Email or phone is required" });
 
 function cors(origin: string | null) {
-  const allowed = (process.env.ENQUIRY_ALLOWED_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const allowed = (process.env.ENQUIRY_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
   const ok = origin && allowed.includes(origin);
   return {
     ...(ok ? { "Access-Control-Allow-Origin": origin } : {}),
@@ -36,7 +46,8 @@ function cors(origin: string | null) {
 function keyMatches(given: string | null) {
   const expected = process.env.ENQUIRY_INTAKE_KEY;
   if (!expected || !given) return false;
-  const a = Buffer.from(given), b = Buffer.from(expected);
+  const a = Buffer.from(given),
+    b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
@@ -56,8 +67,11 @@ export async function POST(req: NextRequest) {
   let body: unknown;
   try {
     body = req.headers.get("content-type")?.includes("application/json")
-      ? await req.json() : Object.fromEntries((await req.formData()).entries());
-  } catch { return NextResponse.json({ error: "invalid body" }, { status: 400, headers }); }
+      ? await req.json()
+      : Object.fromEntries((await req.formData()).entries());
+  } catch {
+    return NextResponse.json({ error: "invalid body" }, { status: 400, headers });
+  }
 
   const parsed = Enquiry.safeParse(body);
   if (!parsed.success) {
@@ -67,13 +81,20 @@ export async function POST(req: NextRequest) {
 
   const sb = supabaseAdmin();
   const ip = (req.headers.get("x-forwarded-for") ?? "").split(",")[0]!.trim() || "unknown";
-  const bucket = "enquiry:" + createHash("sha256").update(ip + (process.env.ENQUIRY_INTAKE_KEY ?? "")).digest("hex").slice(0, 32);
+  const bucket =
+    "enquiry:" +
+    createHash("sha256")
+      .update(ip + (process.env.ENQUIRY_INTAKE_KEY ?? ""))
+      .digest("hex")
+      .slice(0, 32);
   const { data: allowed } = await sb.rpc("hit_rate_limit", { p_bucket: bucket, p_limit: 5, p_window_seconds: 600 });
   if (allowed === false) return NextResponse.json({ error: "too many requests" }, { status: 429, headers });
 
   const { website: _hp, ...payload } = parsed.data;
   const { data, error } = await sb.rpc("ingest_enquiry", {
-    p_org_slug: process.env.ORG_SLUG ?? "vsm-growth", p: payload, p_alert_email: process.env.ALERT_EMAIL ?? null,
+    p_org_slug: process.env.ORG_SLUG ?? "vsm-growth",
+    p: payload,
+    p_alert_email: process.env.ALERT_EMAIL ?? null,
   });
   if (error) {
     console.error("[enquiry] persist failed", error.code);
@@ -81,7 +102,19 @@ export async function POST(req: NextRequest) {
   }
 
   // Best-effort immediate delivery; the cron worker retries anything that fails.
-  try { await drainOutbox(5); } catch (e) { console.error("[enquiry] email deferred", (e as Error).message); }
+  try {
+    await drainOutbox(5);
+  } catch (e) {
+    console.error("[enquiry] email deferred", (e as Error).message);
+  }
 
-  return NextResponse.json({ ok: true, reference: String(data?.lead_id ?? "").slice(0, 8).toUpperCase() }, { status: 201, headers });
+  return NextResponse.json(
+    {
+      ok: true,
+      reference: String(data?.lead_id ?? "")
+        .slice(0, 8)
+        .toUpperCase(),
+    },
+    { status: 201, headers },
+  );
 }

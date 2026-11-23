@@ -1,7 +1,27 @@
 {
-  "regions": ["hnd1"],
+  "regions": [
+    "hnd1"
+  ],
   "crons": [
-    { "path": "/api/cron/email", "schedule": "*/5 * * * *" },
-    { "path": "/api/cron/digest", "schedule": "30 13 * * *" }
+    {
+      "path": "/api/cron/email",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/digest",
+      "schedule": "30 13 * * *"
+    },
+    {
+      "path": "/api/cron/calendar-invitations",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/calendar-sync",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/workflows",
+      "schedule": "*/5 * * * *"
+    }
   ]
 }

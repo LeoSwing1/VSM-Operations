@@ -1,0 +1,141 @@
+"use server";
+import { z } from "zod";
+import { requirePerm } from "@/lib/auth";
+import { supabaseServer } from "@/lib/supabase/server";
+import { supabaseAdmin } from "@/lib/supabase/admin";
+import { getProvider } from "@/lib/email/providers";
+import { temporaryPassword } from "@/lib/passwords";
+import { sendWelcome } from "@/lib/onboarding";
+
+export type PwState = { ok: boolean; message: string; password?: string } | null;
+const Id = z.string().uuid();
+
+/** Loads the target only if the database says the caller may reset them (never the Super Admin, never someone at/above you). */
+async function target(fd: FormData) {
+  const ctx = await requirePerm("people.reset_password");
+  const id = Id.safeParse(fd.get("id"));
+  if (!id.success) return { ctx, err: "Unknown employee." } as const;
+  const sb = await supabaseServer();
+  const [{ data: allowed }, { data: e }] = await Promise.all([
+    sb.rpc("can_reset_password", { p_target: id.data }),
+    sb.from("employees").select("id, user_id, full_name, official_email").eq("id", id.data).maybeSingle(),
+  ]);
+  if (!allowed || !e)
+    return {
+      ctx,
+      err: "You can't reset this person's password. The Super Admin and people at or above your level are protected.",
+    } as const;
+  return { ctx, sb, e } as const;
+}
+
+async function audit(sb: Awaited<ReturnType<typeof supabaseServer>>, action: string, id: string) {
+  await sb.rpc("log_audit", { p_action: action, p_entity: "employee", p_entity_id: id, p_metadata: {} });
+}
+
+export async function sendResetLink(_p: PwState, fd: FormData): Promise<PwState> {
+  const t = await target(fd);
+  if ("err" in t) return { ok: false, message: t.err! };
+  if (!t.e.user_id) return { ok: false, message: "No login yet — use “Send welcome email” first." };
+  const redirectTo = `${process.env.APP_URL ?? ""}/auth/callback?next=/login/reset`;
+  const admin = supabaseAdmin();
+  const provider = await getProvider();
+  const from = process.env.EMAIL_FROM;
+  try {
+    if (provider && from) {
+      // Our own provider (Brevo/Resend) — not limited by Supabase's built-in mailer.
+      const { data, error } = await admin.auth.admin.generateLink({ type: "recovery", email: t.e.official_email, options: { redirectTo } });
+      if (error || !data.properties?.action_link) throw error ?? new Error("no link");
+      const link = data.properties.action_link;
+      await provider.send({
+        from,
+        to: t.e.official_email,
+        subject: "Reset your VSM Ops password",
+        refId: `reset-${t.e.id}-${Date.now()}`,
+        text: `Hi ${t.e.full_name},\n\nYour administrator sent you a password reset for VSM Ops.\nSet a new password: ${link}\n\nThe link works once and expires in 1 hour. If you didn't expect this, tell HR.`,
+        html: `<p>Hi ${escape(t.e.full_name)},</p><p>Your administrator sent you a password reset for <b>VSM Ops</b>.</p><p><a href="${link}" style="background:#D7FF3A;color:#0B0B0C;padding:10px 18px;border-radius:999px;text-decoration:none;font-weight:600">Set a new password</a></p><p style="color:#666;font-size:12px">The link works once and expires in 1 hour. If you didn't expect this, tell HR.</p>`,
+        tags: ["password-reset"],
+      });
+    } else {
+      const { error } = await t.sb.auth.resetPasswordForEmail(t.e.official_email, { redirectTo });
+      if (error) throw error;
+    }
+  } catch (e) {
+    return { ok: false, message: `Couldn't send the reset email: ${(e as Error).message}` };
+  }
+  await audit(t.sb, "auth.password_reset_link_sent", t.e.id);
+  return { ok: true, message: `Reset link emailed to ${t.e.official_email}.` };
+}
+
+export async function setTemporaryPassword(_p: PwState, fd: FormData): Promise<PwState> {
+  const t = await target(fd);
+  if ("err" in t) return { ok: false, message: t.err! };
+  if (!t.e.user_id) return { ok: false, message: "No login yet — use “Send welcome email” first." };
+  const password = temporaryPassword();
+  const { error } = await supabaseAdmin().auth.admin.updateUserById(t.e.user_id!, {
+    password,
+    user_metadata: { must_change_password: true },
+  });
+  if (error) return { ok: false, message: `Couldn't set the password: ${error.message}` };
+  await audit(t.sb, "auth.temporary_password_set", t.e.id);
+  return {
+    ok: true,
+    message: `Temporary password for ${t.e.full_name}. They must change it at first sign-in. Share it privately — it is not stored anywhere.`,
+    password,
+  };
+}
+
+const escape = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+
+/** Welcome email (details + set-password link). Creates the login if the employee doesn't have one yet. */
+export async function resendWelcome(_p: PwState, fd: FormData): Promise<PwState> {
+  const t = await target(fd);
+  if ("err" in t) return { ok: false, message: t.err! };
+  try {
+    await sendWelcome(t.e.id, "link");
+  } catch (e) {
+    return { ok: false, message: `Couldn't send: ${(e as Error).message}` };
+  }
+  await audit(t.sb, "employee.welcome_sent", t.e.id);
+  return { ok: true, message: `Welcome email with a set-password link sent to ${t.e.official_email}.` };
+}
+
+/** New temporary password, emailed to the employee AND shown once here. Must be changed at first sign-in. */
+export async function emailNewPassword(_p: PwState, fd: FormData): Promise<PwState> {
+  const t = await target(fd);
+  if ("err" in t) return { ok: false, message: t.err! };
+  if (!t.e.user_id) return { ok: false, message: "No login yet — use “Send welcome email” first." };
+  const password = temporaryPassword();
+  const { error } = await supabaseAdmin().auth.admin.updateUserById(t.e.user_id, {
+    password,
+    user_metadata: { must_change_password: true },
+  });
+  if (error) return { ok: false, message: `Couldn't set the password: ${error.message}` };
+  const provider = await getProvider();
+  let sent = false;
+  if (provider && process.env.EMAIL_FROM) {
+    const { render } = await import("@/lib/email/templates");
+    const m = render("auth.new_password", { name: t.e.full_name, email: t.e.official_email, password })!;
+    try {
+      await provider.send({
+        from: process.env.EMAIL_FROM,
+        to: t.e.official_email,
+        subject: m.subject,
+        html: m.html,
+        text: m.text,
+        refId: `newpw-${t.e.id}-${Date.now()}`,
+        tags: ["password"],
+      });
+      sent = true;
+    } catch {
+      sent = false;
+    }
+  }
+  await audit(t.sb, "auth.temporary_password_emailed", t.e.id);
+  return {
+    ok: true,
+    message: sent
+      ? `New password emailed to ${t.e.official_email}. It is also shown below once. They must change it at first sign-in.`
+      : `New password set (email isn't configured, so share it privately). They must change it at first sign-in.`,
+    password,
+  };
+}

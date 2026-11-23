@@ -1,12 +1,97 @@
-import { requirePerm,can } from "@/lib/auth";
+import { requirePerm, can } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
-import { Badge,Card,Empty,Field,Flash,PageHeader } from "@/components/ui";
+import { Badge, Card, Empty, Field, Flash, PageHeader } from "@/components/ui";
 import { publishAnnouncement } from "./actions";
 import Link from "next/link";
-export const metadata={title:"Company announcements"};
-export default async function Announcements({searchParams}:{searchParams:Promise<Record<string,string|undefined>>}){
- const sp=await searchParams,ctx=await requirePerm("communication.view"),sb=await supabaseServer();
- const [{data:items},{data:departments},{data:projects}]=await Promise.all([sb.from("company_announcements").select("id,title,body,audience,pinned,published_at,department:departments(name),project:projects(name),author:employees(full_name)").order("pinned",{ascending:false}).order("published_at",{ascending:false}).limit(100),sb.from("departments").select("id,name").order("name"),sb.from("projects").select("id,name").order("name")]);
- return <><PageHeader eyebrow="Communication" title="Announcements"><Link href="/chat" className="btn-ghost">Open team chat</Link></PageHeader><Flash sp={sp}/>{can(ctx,"communication.manage")&&<details className="card mb-6 p-5"><summary className="eyebrow cursor-pointer">Publish announcement</summary><form action={publishAnnouncement} className="mt-4 grid gap-3 sm:grid-cols-2"><Field label="Title"><input name="title" required className="input"/></Field><Field label="Audience"><select name="audience" className="input"><option value="ALL">Everyone</option><option value="DEPARTMENT">Department</option><option value="PROJECT">Project members</option></select></Field><Field label="Department"><select name="department_id" className="input"><option value="">Choose if targeted</option>{(departments??[]).map((d:any)=><option key={d.id} value={d.id}>{d.name}</option>)}</select></Field><Field label="Project"><select name="project_id" className="input"><option value="">Choose if targeted</option>{(projects??[]).map((p:any)=><option key={p.id} value={p.id}>{p.name}</option>)}</select></Field><Field label="Message" className="sm:col-span-2"><textarea name="body" rows={4} required className="input"/></Field><label className="flex items-center gap-2 text-sm"><input type="checkbox" name="pinned"/> Pin announcement</label><div><button className="btn-primary">Publish</button></div></form></details>}
- {!items?.length?<Empty title="No announcements" hint="Company notices and important updates will appear here."/>:<div className="space-y-4">{items.map((a:any)=><Card key={a.id}><div className="flex flex-wrap items-center gap-2"><Badge>{a.audience}</Badge>{a.pinned&&<Badge>PINNED</Badge>}<span className="text-xs text-muted">{a.department?.name??a.project?.name??"Company-wide"}</span></div><h2 className="mt-2 text-lg font-semibold">{a.title}</h2><p className="mt-2 whitespace-pre-wrap text-sm leading-6">{a.body}</p><p className="mt-3 text-xs text-muted">{a.author?.full_name??"Management"} · {new Date(a.published_at).toLocaleString("en-IN")}</p></Card>)}</div>}</>;
+export const metadata = { title: "Company announcements" };
+export default async function Announcements({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
+  const sp = await searchParams,
+    ctx = await requirePerm("communication.view"),
+    sb = await supabaseServer();
+  const [{ data: items }, { data: departments }, { data: projects }] = await Promise.all([
+    sb
+      .from("company_announcements")
+      .select("id,title,body,audience,pinned,published_at,department:departments(name),project:projects(name),author:employees(full_name)")
+      .order("pinned", { ascending: false })
+      .order("published_at", { ascending: false })
+      .limit(100),
+    sb.from("departments").select("id,name").order("name"),
+    sb.from("projects").select("id,name").order("name"),
+  ]);
+  return (
+    <>
+      <PageHeader eyebrow="Communication" title="Announcements">
+        <Link href="/chat" className="btn-ghost">
+          Open team chat
+        </Link>
+      </PageHeader>
+      <Flash sp={sp} />
+      {can(ctx, "communication.manage") && (
+        <details className="card mb-6 p-5">
+          <summary className="eyebrow cursor-pointer">Publish announcement</summary>
+          <form action={publishAnnouncement} className="mt-4 grid gap-3 sm:grid-cols-2">
+            <Field label="Title">
+              <input name="title" required className="input" />
+            </Field>
+            <Field label="Audience">
+              <select name="audience" className="input">
+                <option value="ALL">Everyone</option>
+                <option value="DEPARTMENT">Department</option>
+                <option value="PROJECT">Project members</option>
+              </select>
+            </Field>
+            <Field label="Department">
+              <select name="department_id" className="input">
+                <option value="">Choose if targeted</option>
+                {(departments ?? []).map((d: any) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Project">
+              <select name="project_id" className="input">
+                <option value="">Choose if targeted</option>
+                {(projects ?? []).map((p: any) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Message" className="sm:col-span-2">
+              <textarea name="body" rows={4} required className="input" />
+            </Field>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" name="pinned" /> Pin announcement
+            </label>
+            <div>
+              <button className="btn-primary">Publish</button>
+            </div>
+          </form>
+        </details>
+      )}
+      {!items?.length ? (
+        <Empty title="No announcements" hint="Company notices and important updates will appear here." />
+      ) : (
+        <div className="space-y-4">
+          {items.map((a: any) => (
+            <Card key={a.id}>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge>{a.audience}</Badge>
+                {a.pinned && <Badge>PINNED</Badge>}
+                <span className="text-xs text-muted">{a.department?.name ?? a.project?.name ?? "Company-wide"}</span>
+              </div>
+              <h2 className="mt-2 text-lg font-semibold">{a.title}</h2>
+              <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{a.body}</p>
+              <p className="mt-3 text-xs text-muted">
+                {a.author?.full_name ?? "Management"} · {new Date(a.published_at).toLocaleString("en-IN")}
+              </p>
+            </Card>
+          ))}
+        </div>
+      )}
+    </>
+  );
 }

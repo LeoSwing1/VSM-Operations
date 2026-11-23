@@ -3,21 +3,258 @@ import { supabaseServer } from "@/lib/supabase/server";
 import { Badge, Card, Empty, Field, Flash, PageHeader, Stat, TableWrap } from "@/components/ui";
 import { createCandidate, hireCandidate, saveInterviewFeedback, scheduleInterview, updateCandidateStage } from "./actions";
 export const metadata = { title: "Recruitment" };
-const STAGES = ["APPLIED","SCREENING","INTERVIEW","OFFER","HIRED","REJECTED","WITHDRAWN"];
-export default async function Recruitment({searchParams}:{searchParams:Promise<Record<string,string|undefined>>}){
- const sp=await searchParams; const ctx=await requirePerm("recruit.view","recruit.manage"); const sb=await supabaseServer(); const manage=can(ctx,"recruit.manage");
- const [{data:candidates},{data:departments},{data:employees},{data:interviews}]=await Promise.all([
-  sb.from("candidates").select("id,full_name,email,phone,role_applied,stage,source,created_at,department:departments(name),owner:employees!candidates_owner_id_fkey(full_name)").order("created_at",{ascending:false}).limit(200),
-  sb.from("departments").select("id,name").order("name"),sb.from("employee_directory").select("id,full_name").order("full_name"),
-  sb.from("candidate_interviews").select("id,candidate_id,scheduled_at,interview_type,result,score,feedback,candidate:candidates(full_name),interviewer:employees(full_name)").gte("scheduled_at",new Date(Date.now()-7*86400000).toISOString()).order("scheduled_at").limit(100)
- ]); const rows=candidates??[]; const count=(s:string)=>rows.filter((c:any)=>c.stage===s).length;
- return <><PageHeader eyebrow="People · Talent acquisition" title="Recruitment">{manage&&<a className="btn-primary" href={sp.new?"/recruitment":"/recruitment?new=1"}>{sp.new?"Close":"Add candidate"}</a>}</PageHeader><Flash sp={sp}/>
- <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">{STAGES.map(s=><Stat key={s} label={s.replaceAll("_"," ")} value={count(s)} hint="Candidates"/>)}</div>
- {manage&&sp.new&&<Card title="New candidate" className="mt-6"><form action={createCandidate} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
- <Field label="Full name"><input className="input" name="full_name" required minLength={2}/></Field><Field label="Email"><input className="input" name="email" type="email" required/></Field><Field label="Phone"><input className="input" name="phone"/></Field><Field label="Role applied for"><input className="input" name="role_applied" required placeholder="e.g. SEO Executive"/></Field>
- <Field label="Department"><select className="input" name="department_id"><option value="">Unassigned</option>{(departments??[]).map((d:any)=><option key={d.id} value={d.id}>{d.name}</option>)}</select></Field><Field label="Source"><select className="input" name="source">{["DIRECT","REFERRAL","JOB_BOARD","LINKEDIN","WEBSITE","OTHER"].map(s=><option key={s}>{s}</option>)}</select></Field>
- <Field label="Recruiter / owner"><select className="input" name="owner_id"><option value="">Unassigned</option>{(employees??[]).map((e:any)=><option key={e.id} value={e.id}>{e.full_name}</option>)}</select></Field><Field label="Notes"><textarea className="input min-h-10" name="notes" rows={2}/></Field><div className="flex items-end"><button className="btn-primary">Save candidate</button></div></form></Card>}
- <Card title="Candidate pipeline" className="mt-6">{rows.length===0?<Empty title="No candidates yet" hint={manage?"Add your first candidate to start tracking recruitment.":"No candidates are visible."}/>:<TableWrap><table className="table min-w-[900px]"><thead><tr><th>Candidate</th><th>Position</th><th>Department</th><th>Source</th><th>Owner</th><th>Added</th><th>Stage</th><th>Hire</th></tr></thead><tbody>{rows.map((c:any)=><tr key={c.id}><td><div className="font-semibold">{c.full_name}</div><div className="text-xs text-muted">{c.email}{c.phone?` · ${c.phone}`:""}</div></td><td>{c.role_applied}</td><td>{c.department?.name??"—"}</td><td className="text-xs">{c.source.replaceAll("_"," ")}</td><td>{c.owner?.full_name??"—"}</td><td className="text-xs text-muted">{new Date(c.created_at).toLocaleDateString("en-IN")}</td><td>{manage && c.stage!=="HIRED"?<form action={updateCandidateStage} className="flex items-center gap-2"><input type="hidden" name="id" value={c.id}/><select className="input min-w-32" name="stage" defaultValue={c.stage}>{STAGES.filter(s=>s!=="HIRED").map(s=><option key={s}>{s}</option>)}</select><input className="input min-w-32" name="rejection_reason" placeholder="Reason if rejecting"/><button className="btn-ghost">Save</button></form>:<Badge>{c.stage}</Badge>}</td><td>{manage && c.stage==="OFFER"?<details><summary className="cursor-pointer text-xs font-semibold text-volt">Convert</summary><form action={hireCandidate} className="mt-2 min-w-48 space-y-2"><input type="hidden" name="id" value={c.id}/><input className="input" name="employee_code" placeholder="Employee ID" required/><input className="input" type="date" name="joining_date" required/><select className="input" name="employment_type">{["FULL_TIME","PART_TIME","CONTRACT","INTERN","CONSULTANT"].map(t=><option key={t}>{t}</option>)}</select><button className="btn-ghost">Confirm hire</button></form></details>:"—"}</td></tr>)}</tbody></table></TableWrap>}</Card>
- <div className="mt-6 grid gap-6 xl:grid-cols-2">{manage&&<Card title="Schedule interview"><form action={scheduleInterview} className="grid gap-3 sm:grid-cols-2"><Field label="Candidate"><select className="input" name="candidate_id" required>{rows.filter((c:any)=>!["HIRED","REJECTED","WITHDRAWN"].includes(c.stage)).map((c:any)=><option key={c.id} value={c.id}>{c.full_name} · {c.role_applied}</option>)}</select></Field><Field label="Interviewer"><select className="input" name="interviewer_id"><option value="">Unassigned</option>{(employees??[]).map((e:any)=><option key={e.id} value={e.id}>{e.full_name}</option>)}</select></Field><Field label="Date and time"><input className="input" type="datetime-local" name="scheduled_at" required/></Field><Field label="Interview type"><select className="input" name="interview_type">{["SCREENING","TECHNICAL","CULTURE","FINAL","OTHER"].map(s=><option key={s}>{s}</option>)}</select></Field><button className="btn-primary sm:col-span-2">Schedule interview</button></form></Card>}
- <Card title="Upcoming & recent interviews">{(interviews??[]).length===0?<Empty title="No interviews scheduled" hint="Scheduled interviews will appear here."/>:<div className="space-y-4">{(interviews??[]).map((i:any)=><div key={i.id} className="border-b border-line pb-3 last:border-0"><div className="flex flex-wrap items-center justify-between gap-2"><div className="font-semibold">{i.candidate?.full_name??"Candidate"}</div><Badge>{i.result}</Badge></div><p className="text-xs text-muted">{new Date(i.scheduled_at).toLocaleString("en-IN")} · {i.interview_type} · {i.interviewer?.full_name??"No interviewer"}</p>{manage&&<form action={saveInterviewFeedback} className="mt-2 grid gap-2 sm:grid-cols-[130px_100px_1fr_auto]"><input type="hidden" name="id" value={i.id}/><select className="input" name="result" defaultValue={i.result}>{["PENDING","PASS","FAIL","ON_HOLD"].map(s=><option key={s}>{s}</option>)}</select><input className="input" name="score" type="number" min="0" max="100" placeholder="Score" defaultValue={i.score??""}/><input className="input" name="feedback" placeholder="Feedback" defaultValue={i.feedback??""}/><button className="btn-ghost">Save</button></form>}</div>)}</div>}</Card></div></>;
+const STAGES = ["APPLIED", "SCREENING", "INTERVIEW", "OFFER", "HIRED", "REJECTED", "WITHDRAWN"];
+export default async function Recruitment({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
+  const sp = await searchParams;
+  const ctx = await requirePerm("recruit.view", "recruit.manage");
+  const sb = await supabaseServer();
+  const manage = can(ctx, "recruit.manage");
+  const [{ data: candidates }, { data: departments }, { data: employees }, { data: interviews }] = await Promise.all([
+    sb
+      .from("candidates")
+      .select(
+        "id,full_name,email,phone,role_applied,stage,source,created_at,department:departments(name),owner:employees!candidates_owner_id_fkey(full_name)",
+      )
+      .order("created_at", { ascending: false })
+      .limit(200),
+    sb.from("departments").select("id,name").order("name"),
+    sb.from("employee_directory").select("id,full_name").order("full_name"),
+    sb
+      .from("candidate_interviews")
+      .select(
+        "id,candidate_id,scheduled_at,interview_type,result,score,feedback,candidate:candidates(full_name),interviewer:employees(full_name)",
+      )
+      .gte("scheduled_at", new Date(Date.now() - 7 * 86400000).toISOString())
+      .order("scheduled_at")
+      .limit(100),
+  ]);
+  const rows = candidates ?? [];
+  const count = (s: string) => rows.filter((c: any) => c.stage === s).length;
+  return (
+    <>
+      <PageHeader eyebrow="People · Talent acquisition" title="Recruitment">
+        {manage && (
+          <a className="btn-primary" href={sp.new ? "/recruitment" : "/recruitment?new=1"}>
+            {sp.new ? "Close" : "Add candidate"}
+          </a>
+        )}
+      </PageHeader>
+      <Flash sp={sp} />
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
+        {STAGES.map((s) => (
+          <Stat key={s} label={s.replaceAll("_", " ")} value={count(s)} hint="Candidates" />
+        ))}
+      </div>
+      {manage && sp.new && (
+        <Card title="New candidate" className="mt-6">
+          <form action={createCandidate} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <Field label="Full name">
+              <input className="input" name="full_name" required minLength={2} />
+            </Field>
+            <Field label="Email">
+              <input className="input" name="email" type="email" required />
+            </Field>
+            <Field label="Phone">
+              <input className="input" name="phone" />
+            </Field>
+            <Field label="Role applied for">
+              <input className="input" name="role_applied" required placeholder="e.g. SEO Executive" />
+            </Field>
+            <Field label="Department">
+              <select className="input" name="department_id">
+                <option value="">Unassigned</option>
+                {(departments ?? []).map((d: any) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Source">
+              <select className="input" name="source">
+                {["DIRECT", "REFERRAL", "JOB_BOARD", "LINKEDIN", "WEBSITE", "OTHER"].map((s) => (
+                  <option key={s}>{s}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Recruiter / owner">
+              <select className="input" name="owner_id">
+                <option value="">Unassigned</option>
+                {(employees ?? []).map((e: any) => (
+                  <option key={e.id} value={e.id}>
+                    {e.full_name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Notes">
+              <textarea className="input min-h-10" name="notes" rows={2} />
+            </Field>
+            <div className="flex items-end">
+              <button className="btn-primary">Save candidate</button>
+            </div>
+          </form>
+        </Card>
+      )}
+      <Card title="Candidate pipeline" className="mt-6">
+        {rows.length === 0 ? (
+          <Empty
+            title="No candidates yet"
+            hint={manage ? "Add your first candidate to start tracking recruitment." : "No candidates are visible."}
+          />
+        ) : (
+          <TableWrap>
+            <table className="table min-w-[900px]">
+              <thead>
+                <tr>
+                  <th>Candidate</th>
+                  <th>Position</th>
+                  <th>Department</th>
+                  <th>Source</th>
+                  <th>Owner</th>
+                  <th>Added</th>
+                  <th>Stage</th>
+                  <th>Hire</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((c: any) => (
+                  <tr key={c.id}>
+                    <td>
+                      <div className="font-semibold">{c.full_name}</div>
+                      <div className="text-xs text-muted">
+                        {c.email}
+                        {c.phone ? ` · ${c.phone}` : ""}
+                      </div>
+                    </td>
+                    <td>{c.role_applied}</td>
+                    <td>{c.department?.name ?? "—"}</td>
+                    <td className="text-xs">{c.source.replaceAll("_", " ")}</td>
+                    <td>{c.owner?.full_name ?? "—"}</td>
+                    <td className="text-xs text-muted">{new Date(c.created_at).toLocaleDateString("en-IN")}</td>
+                    <td>
+                      {manage && c.stage !== "HIRED" ? (
+                        <form action={updateCandidateStage} className="flex items-center gap-2">
+                          <input type="hidden" name="id" value={c.id} />
+                          <select className="input min-w-32" name="stage" defaultValue={c.stage}>
+                            {STAGES.filter((s) => s !== "HIRED").map((s) => (
+                              <option key={s}>{s}</option>
+                            ))}
+                          </select>
+                          <input className="input min-w-32" name="rejection_reason" placeholder="Reason if rejecting" />
+                          <button className="btn-ghost">Save</button>
+                        </form>
+                      ) : (
+                        <Badge>{c.stage}</Badge>
+                      )}
+                    </td>
+                    <td>
+                      {manage && c.stage === "OFFER" ? (
+                        <details>
+                          <summary className="cursor-pointer text-xs font-semibold text-volt">Convert</summary>
+                          <form action={hireCandidate} className="mt-2 min-w-48 space-y-2">
+                            <input type="hidden" name="id" value={c.id} />
+                            <input className="input" name="employee_code" placeholder="Employee ID" required />
+                            <input className="input" type="date" name="joining_date" required />
+                            <select className="input" name="employment_type">
+                              {["FULL_TIME", "PART_TIME", "CONTRACT", "INTERN", "CONSULTANT"].map((t) => (
+                                <option key={t}>{t}</option>
+                              ))}
+                            </select>
+                            <button className="btn-ghost">Confirm hire</button>
+                          </form>
+                        </details>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
+        )}
+      </Card>
+      <div className="mt-6 grid gap-6 xl:grid-cols-2">
+        {manage && (
+          <Card title="Schedule interview">
+            <form action={scheduleInterview} className="grid gap-3 sm:grid-cols-2">
+              <Field label="Candidate">
+                <select className="input" name="candidate_id" required>
+                  {rows
+                    .filter((c: any) => !["HIRED", "REJECTED", "WITHDRAWN"].includes(c.stage))
+                    .map((c: any) => (
+                      <option key={c.id} value={c.id}>
+                        {c.full_name} · {c.role_applied}
+                      </option>
+                    ))}
+                </select>
+              </Field>
+              <Field label="Interviewer">
+                <select className="input" name="interviewer_id">
+                  <option value="">Unassigned</option>
+                  {(employees ?? []).map((e: any) => (
+                    <option key={e.id} value={e.id}>
+                      {e.full_name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Date and time">
+                <input className="input" type="datetime-local" name="scheduled_at" required />
+              </Field>
+              <Field label="Interview type">
+                <select className="input" name="interview_type">
+                  {["SCREENING", "TECHNICAL", "CULTURE", "FINAL", "OTHER"].map((s) => (
+                    <option key={s}>{s}</option>
+                  ))}
+                </select>
+              </Field>
+              <button className="btn-primary sm:col-span-2">Schedule interview</button>
+            </form>
+          </Card>
+        )}
+        <Card title="Upcoming & recent interviews">
+          {(interviews ?? []).length === 0 ? (
+            <Empty title="No interviews scheduled" hint="Scheduled interviews will appear here." />
+          ) : (
+            <div className="space-y-4">
+              {(interviews ?? []).map((i: any) => (
+                <div key={i.id} className="border-b border-line pb-3 last:border-0">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-semibold">{i.candidate?.full_name ?? "Candidate"}</div>
+                    <Badge>{i.result}</Badge>
+                  </div>
+                  <p className="text-xs text-muted">
+                    {new Date(i.scheduled_at).toLocaleString("en-IN")} · {i.interview_type} · {i.interviewer?.full_name ?? "No interviewer"}
+                  </p>
+                  {manage && (
+                    <form action={saveInterviewFeedback} className="mt-2 grid gap-2 sm:grid-cols-[130px_100px_1fr_auto]">
+                      <input type="hidden" name="id" value={i.id} />
+                      <select className="input" name="result" defaultValue={i.result}>
+                        {["PENDING", "PASS", "FAIL", "ON_HOLD"].map((s) => (
+                          <option key={s}>{s}</option>
+                        ))}
+                      </select>
+                      <input
+                        className="input"
+                        name="score"
+                        type="number"
+                        min="0"
+                        max="100"
+                        placeholder="Score"
+                        defaultValue={i.score ?? ""}
+                      />
+                      <input className="input" name="feedback" placeholder="Feedback" defaultValue={i.feedback ?? ""} />
+                      <button className="btn-ghost">Save</button>
+                    </form>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
+    </>
+  );
 }

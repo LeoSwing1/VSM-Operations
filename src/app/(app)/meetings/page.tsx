@@ -1,3 +1,91 @@
-import {requireContext,can} from "@/lib/auth"; import {supabaseServer} from "@/lib/supabase/server"; import {Badge,Card,Empty,Field,Flash,PageHeader} from "@/components/ui"; import {fmtDateTime} from "@/lib/engines/time"; import {saveMeetingNotes} from "./actions";
-export const metadata={title:"Meetings"};
-export default async function Meetings({searchParams}:{searchParams:Promise<Record<string,string|undefined>>}){const sp=await searchParams,ctx=await requireContext(),sb=await supabaseServer(); const {data}=await sb.from("calendar_events").select("id,title,description,starts_at,ends_at,location,meeting_url,status,organizer_id,notes:meeting_notes(agenda,minutes,decisions,action_items)").eq("event_type","MEETING").gte("ends_at",new Date(Date.now()-30*86400000).toISOString()).order("starts_at",{ascending:false}).limit(100); return <><PageHeader eyebrow="Collaboration" title="Meetings"><a className="btn-primary" href="/calendar">Schedule meeting</a></PageHeader><Flash sp={sp}/><Card title="Meeting register" hint="Agendas, minutes, decisions and action items stay attached to each meeting.">{!data?.length?<Empty title="No meetings found"/>:<div className="space-y-5">{data.map((e:any)=>{const n=Array.isArray(e.notes)?e.notes[0]:e.notes; const editable=e.organizer_id===ctx.employee_id||can(ctx,"calendar.manage");return <article key={e.id} className="rounded-xl border border-line p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><strong>{e.title}</strong><p className="text-xs text-muted">{fmtDateTime(e.starts_at,ctx.timezone)} · {e.location??"No location"}</p></div><div className="flex items-center gap-2"><Badge>{e.status}</Badge>{e.meeting_url&&<a href={e.meeting_url} target="_blank" rel="noreferrer" className="btn-ghost">Join</a>}</div></div>{editable?<form action={saveMeetingNotes} className="mt-4 grid gap-3 md:grid-cols-2"><input type="hidden" name="event_id" value={e.id}/><Field label="Agenda"><textarea name="agenda" className="input" rows={3} defaultValue={n?.agenda??""}/></Field><Field label="Minutes"><textarea name="minutes" className="input" rows={3} defaultValue={n?.minutes??""}/></Field><Field label="Decisions (one per line)"><textarea name="decisions" className="input" rows={3} defaultValue={(n?.decisions??[]).join("\n")}/></Field><Field label="Action items (one per line)"><textarea name="action_items" className="input" rows={3} defaultValue={(n?.action_items??[]).join("\n")}/></Field><div><button className="btn-ghost">Save meeting notes</button></div></form>:<div className="mt-3 grid gap-2 text-sm md:grid-cols-2"><p><strong>Agenda:</strong> {n?.agenda||"Not recorded"}</p><p><strong>Minutes:</strong> {n?.minutes||"Not recorded"}</p></div>}</article>})}</div>}</Card></>}
+import { requireContext, can } from "@/lib/auth";
+import { supabaseServer } from "@/lib/supabase/server";
+import { Badge, Card, Empty, Field, Flash, PageHeader } from "@/components/ui";
+import { fmtDateTime } from "@/lib/engines/time";
+import { saveMeetingNotes } from "./actions";
+export const metadata = { title: "Meetings" };
+export default async function Meetings({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
+  const sp = await searchParams,
+    ctx = await requireContext(),
+    sb = await supabaseServer();
+  const { data } = await sb
+    .from("calendar_events")
+    .select(
+      "id,title,description,starts_at,ends_at,location,meeting_url,status,organizer_id,notes:meeting_notes(agenda,minutes,decisions,action_items)",
+    )
+    .eq("event_type", "MEETING")
+    .gte("ends_at", new Date(Date.now() - 30 * 86400000).toISOString())
+    .order("starts_at", { ascending: false })
+    .limit(100);
+  return (
+    <>
+      <PageHeader eyebrow="Collaboration" title="Meetings">
+        <a className="btn-primary" href="/calendar">
+          Schedule meeting
+        </a>
+      </PageHeader>
+      <Flash sp={sp} />
+      <Card title="Meeting register" hint="Agendas, minutes, decisions and action items stay attached to each meeting.">
+        {!data?.length ? (
+          <Empty title="No meetings found" />
+        ) : (
+          <div className="space-y-5">
+            {data.map((e: any) => {
+              const n = Array.isArray(e.notes) ? e.notes[0] : e.notes;
+              const editable = e.organizer_id === ctx.employee_id || can(ctx, "calendar.manage");
+              return (
+                <article key={e.id} className="rounded-xl border border-line p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <strong>{e.title}</strong>
+                      <p className="text-xs text-muted">
+                        {fmtDateTime(e.starts_at, ctx.timezone)} · {e.location ?? "No location"}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge>{e.status}</Badge>
+                      {e.meeting_url && (
+                        <a href={e.meeting_url} target="_blank" rel="noreferrer" className="btn-ghost">
+                          Join
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                  {editable ? (
+                    <form action={saveMeetingNotes} className="mt-4 grid gap-3 md:grid-cols-2">
+                      <input type="hidden" name="event_id" value={e.id} />
+                      <Field label="Agenda">
+                        <textarea name="agenda" className="input" rows={3} defaultValue={n?.agenda ?? ""} />
+                      </Field>
+                      <Field label="Minutes">
+                        <textarea name="minutes" className="input" rows={3} defaultValue={n?.minutes ?? ""} />
+                      </Field>
+                      <Field label="Decisions (one per line)">
+                        <textarea name="decisions" className="input" rows={3} defaultValue={(n?.decisions ?? []).join("\n")} />
+                      </Field>
+                      <Field label="Action items (one per line)">
+                        <textarea name="action_items" className="input" rows={3} defaultValue={(n?.action_items ?? []).join("\n")} />
+                      </Field>
+                      <div>
+                        <button className="btn-ghost">Save meeting notes</button>
+                      </div>
+                    </form>
+                  ) : (
+                    <div className="mt-3 grid gap-2 text-sm md:grid-cols-2">
+                      <p>
+                        <strong>Agenda:</strong> {n?.agenda || "Not recorded"}
+                      </p>
+                      <p>
+                        <strong>Minutes:</strong> {n?.minutes || "Not recorded"}
+                      </p>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+    </>
+  );
+}

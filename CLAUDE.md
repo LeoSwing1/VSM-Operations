@@ -27,7 +27,7 @@ Internal operating system for VSM Growth and VSM Scholars (Meerut & Noida, India
 
 ## Layout
 ```
-supabase/migrations/   0001 foundation · 0002 workforce · 0003 performance+payroll · 0004 CRM+notifications · 0005 payroll adjustments · 0006 access hierarchy · 0007 notification prefs + integrations · 0008 recruitment · 0009 HR documents/probation/exit · 0010 Finance ERP · 0011 Projects/Communication
+supabase/migrations/   0001 foundation · 0002 workforce · 0003 performance+payroll · 0004 CRM+notifications · 0005 payroll adjustments · 0006 access hierarchy · 0007 notification prefs + integrations · 0008 recruitment · 0009 HR documents/probation/exit · 0010 Finance ERP · 0011 Projects/Communication · 0012 Chat security · 0013 Executive reporting · 0014 Calendar/workforce · 0015 Advanced calendar/quality exports · 0016 Workflow automation · 0017 Workflow builder · 0018 Integration Control Centre
 src/lib/engines/       pure, unit-tested logic: attendance.ts performance.ts payroll.ts time.ts
 src/lib/data/          server loaders that feed engines (run under RLS)
 src/lib/email/         templates.ts · providers.ts (Brevo/Resend) · worker.ts (outbox drain)
@@ -62,3 +62,72 @@ npm run build
 - Task timesheets (`task_time_entries`) are separate from attendance and from existing project workspace timesheets (`project_time_entries`). Task timesheet rows require an assigned task; project-only time remains in the project workspace.
 - Teams/groups, quality assessments/checklists, calendar invitations and meeting notes are tenant-scoped with RLS and relationship guards. Do not bypass their RLS with client-side writes.
 - Meeting invitees receive in-app MEETINGS notifications. Calendar recurrence is stored only; no recurrence expansion or external calendar sync exists yet.
+
+## Block 09 additions
+
+- Calendar month/week/day views; bounded recurring series are atomically expanded by the 12-argument `create_calendar_event` RPC.
+- Google/Microsoft OAuth tokens are AES-256-GCM encrypted with `CALENDAR_TOKEN_ENCRYPTION_KEY`; never log or expose token columns. The cron sync uses the service-role client only behind `CRON_SECRET`, imports provider events as private, and syncs a rolling 90-day window.
+- Calendar email invitations use `claim_calendar_email_deliveries()` with `FOR UPDATE SKIP LOCKED`, retry backoff and a five-attempt cap.
+- Quality evidence is private in the `quality-evidence` Storage bucket, path-scoped by org and assessment, size/MIME limited, SHA-256 recorded, and exposed only through short-lived signed URLs.
+- Timer entries use `started_at`/`ended_at` in `task_time_entries`; a partial unique index permits one active timer per employee. Attendance remains a distinct presence record.
+- `src/lib/reports/workbook.ts` emits OOXML XLSX and paginated PDF without spreadsheet formula execution. `reportResponse()` centralises private CSV/XLSX/PDF responses; ICS is generated separately for calendar interchange.
+
+## Block 10 workflow automation
+
+Workflow rules are tenant-scoped and cannot execute arbitrary code. Events are idempotently queued; trusted workers claim via `FOR UPDATE SKIP LOCKED` and finish through service-role-only RPCs. Wire only typed, allowlisted actions and retain permission checks at execution time.
+
+## Block 12 UI boundaries
+
+- `/settings/admin` is organisation-scoped and Super-Admin-only; do not turn it into cross-tenant platform administration without a separately designed service-role control plane and audit model.
+- `/settings/access` retains database/RLS enforcement. UI switches are presentation only; never weaken `saveMatrix` or sensitive permission rules to make a toggle appear enabled.
+- Chat uses the existing membership-gated APIs and four-second polling. Do not expose private channel messages or storage objects to non-members.
+
+
+## Block 13 integration diagnostics
+- Keep all integration probes server-side and behind `settings.manage`.
+- Never display service-role credentials, OAuth secrets, access tokens, intake keys, or user records in diagnostics.
+- A configured environment variable is not proof of a working connection; label credential readiness separately from live test results and linked account state.
+- Realtime handshake success does not imply chat subscriptions are implemented.
+- Diagnostic history must remain organisation-scoped with RLS and operator attribution.
+
+## Block 14 implementation notes
+
+- Browser Realtime client: `src/lib/supabase/browser.ts` (public anon key only).
+- Chat subscribes to private `chat:<channel UUID>` topics; topic access is checked by `can_access_chat_realtime_topic()` in migration 0019.
+- Presence and typing are ephemeral Realtime events; they must never be treated as attendance or authoritative employee state.
+- Notifications subscribe to recipient-filtered Postgres Changes and rely on existing notifications RLS.
+- Browser Notification API is opt-in and foreground-app dependent; do not describe this as Web Push.
+
+
+## Block 15 operations
+- Apply migration `0020_business_workflow_sla_execution.sql` (or the regenerated `supabase/all_migrations.sql`).
+- Deploy the updated `/api/cron/workflows` route; it scans SLA events before draining workflow runs every five minutes.
+- Configure `CRON_SECRET` in the deployment environment.
+- Tune the 24-hour task due-soon, 48-hour pending-timesheet and 12-hour incomplete-attendance thresholds to the organisation policy before payroll-critical use.
+- Workflow actions support `notify_actor` and `notify_target`; target routing requires `target_employee_id` in the event payload and same-organisation active employee validation.
+
+## Block 17 rules
+- All outbound channels go through `delivery_outbox` (SQL `enqueue_delivery`), never a direct send from business code. Direct sends are allowed only for admin test buttons (`sendDirect`).
+- Any new org event must be added to `org_event_keys()` (SQL) **and** `src/lib/delivery/events.ts`, plus a text in `messages.ts`. Never include amounts.
+- Links in outbound messages must pass `localPath()` (same-origin only).
+- Webhook destinations must go through `assertSafeUrl`. Never select `webhook_endpoints.secret` with the user client.
+- Inbound providers verify the signature first, insert `inbound_webhook_events` (idempotent), and **never** mark invoices or payroll paid.
+- Permission matrix writes go through `togglePermission`; the DB rules are the authority, and the UI only mirrors them.
+
+## Block 18 rules
+- There is exactly ONE Super Admin. Never add code paths that create, promote, demote, delete, relink, restrict or reset the Super Admin; the DB (`protect_super_admin`, `one_super_admin_per_org`, `protect_sa_auth_user`, `can_reset_password`) blocks them, so don't work around it with the service role.
+- Employee IDs come from the DB (`assign_employee_code`). Send a blank code; never compute IDs in the app.
+- New posts go in `designations`; team membership and team chat sync are triggers. Don't duplicate them in the app.
+- Pages that show changing data should mount `<LiveSync tables={[...]} />`. Don't add polling.
+- Demo data is always `is_demo = true` with random passwords shown once. Never hard-code passwords (a unit test checks this).
+- Local scripts must never overwrite `.env.local`.
+- Never rely on Supabase's automatic table grants (new projects don't have them). The live DB is installed or updated with `supabase/repair/catch_up.sql`; after adding a migration, add its marker in `scripts/build-catch-up.py` and rebuild. CI: run `./scripts/test-db.sh` and `STRICT_GRANTS=1 ./scripts/test-db.sh`.
+
+## Blocks 19–23 rules
+- Punches go through `record_attendance_v2` only; the DB enforces geofence/selfie/offline rules. Never trust client time except as `p_offline_at` (the DB bounds it).
+- Statutory maths lives in `src/lib/engines/statutory.ts` (pure + tested). Change defaults there AND in `0029` if a rule changes; never hard-code rates in pages.
+- Bank files and payout confirmations never mark anything paid without `mark_entry_paid` (payroll.pay, not for yourself).
+- Google: tokens only via `src/lib/google/oauth.ts` (service role). Calendar copies carry no attendees and are tagged `vsmEventId`; imports set `external_source`.
+- Scholars fees: insert DUE rows only; PAID/WAIVED only through `scholar_confirm_payment` / `scholar_waive_payment`. Certificates only through `scholar_issue_certificate`.
+- Post-based grants (`designations.grants`) must never include sensitive permissions (the DB ignores them anyway).
+- Server errors are captured by `src/instrumentation.ts`; never log request bodies or secrets (use `scrub`).

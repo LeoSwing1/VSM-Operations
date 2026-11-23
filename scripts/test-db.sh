@@ -8,7 +8,13 @@ psql -q -d postgres -c "drop database if exists $DB" -c "create database $DB"
 for r in anon authenticated service_role; do psql -q -d postgres -c "do \$\$begin create role $r nologin; exception when duplicate_object then null; end\$\$" ; done
 psql -q -d postgres -c "alter role service_role bypassrls"
 PSQL="psql -q -v ON_ERROR_STOP=1 -d $DB"
-$PSQL -f <(grep -v '^create role' "$ROOT/tests/db/00_supabase_shim.sql")
-for f in "$ROOT"/supabase/migrations/*.sql; do echo "▸ migrate $(basename "$f")"; $PSQL -f "$f"; done
+if [ "${STRICT_GRANTS:-0}" = "1" ]; then
+  # Like newer Supabase projects: NO automatic table grants; install through the catch-up/repair script.
+  $PSQL -f <(grep -v '^create role\|^alter default privileges' "$ROOT/tests/db/00_supabase_shim.sql")
+  echo "▸ catch-up (strict grants)"; $PSQL -f "$ROOT/supabase/repair/catch_up.sql"
+else
+  $PSQL -f <(grep -v '^create role' "$ROOT/tests/db/00_supabase_shim.sql")
+  for f in "$ROOT"/supabase/migrations/*.sql; do echo "▸ migrate $(basename "$f")"; $PSQL -f "$f"; done
+fi
 echo "▸ security suite"
 $PSQL -f "$ROOT/tests/db/security.sql"

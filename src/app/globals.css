@@ -44,3 +44,57 @@ body { font-family: 'Inter Tight', ui-sans-serif, system-ui, sans-serif; font-fe
   .no-print { display: none !important; }
   main { padding: 0 !important; }
 }
+
+/* ---------- Login intro: logo centre → top-right, form slides in (Block 17) ---------- */
+.vsm-mark-sub { display: block; margin-top: 0.35em; font: 600 0.14em/1 "Inter Tight", ui-sans-serif, system-ui; letter-spacing: 0.32em; text-transform: uppercase; color: rgb(var(--muted)); }
+.login-logo {
+  position: fixed; top: 22px; right: 28px; z-index: 60; font-size: 44px; line-height: 0.9; text-align: right;
+  transform-origin: center; will-change: transform;
+  animation: login-logo-move 1.25s cubic-bezier(.77,0,.18,1) 0.9s both;
+}
+.login-logo .vsm-mark-sub { animation: login-fade-out .35s ease 0.75s both; }
+@keyframes login-logo-move {
+  from { transform: translate(calc(-50vw + 28px + 50%), calc(50vh - 22px - 50%)) scale(2.6); }
+  to   { transform: translate(0, 0) scale(1); }
+}
+.login-curtain {
+  position: fixed; inset: 0; z-index: 50; background: rgb(var(--paper)); pointer-events: none;
+  animation: login-curtain-up 0.9s cubic-bezier(.77,0,.18,1) 1.25s both;
+}
+.login-curtain::after { /* thin volt line that draws under the logo while it waits */
+  content: ""; position: absolute; left: 50%; top: calc(50% + 96px); height: 2px; width: 220px; margin-left: -110px;
+  background: #D7FF3A; transform-origin: left; animation: login-line 0.8s cubic-bezier(.6,0,.2,1) 0.15s both, login-fade-out .3s ease 0.95s forwards;
+}
+@keyframes login-curtain-up { from { clip-path: inset(0 0 0 0); } to { clip-path: inset(0 0 100% 0); } }
+@keyframes login-line { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes login-fade-out { to { opacity: 0; } }
+.login-rise { animation: login-rise .8s cubic-bezier(.2,.7,.2,1) both; animation-delay: calc(1.7s + var(--i, 0) * 90ms); }
+@keyframes login-rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+.login-word { display: inline-block; overflow: hidden; vertical-align: top; padding-bottom: 0.14em; margin-bottom: -0.14em; }
+.login-word > span { display: inline-block; animation: login-word 1s cubic-bezier(.2,.7,.2,1) both; animation-delay: calc(1.65s + var(--i, 0) * 120ms); }
+@keyframes login-word { from { transform: translateY(105%); } to { transform: none; } }
+.login-glow { animation: login-glow 9s ease-in-out 2s infinite alternate; }
+@keyframes login-glow { from { transform: translate(0,0) scale(1); } to { transform: translate(-60px, 40px) scale(1.15); } }
+
+/* returning in the same tab, after a form error, or reduced motion → no intro */
+.intro-done .login-curtain, .no-intro .login-curtain { display: none; }
+.intro-done .login-logo, .no-intro .login-logo, .intro-done .login-logo .vsm-mark-sub, .no-intro .login-logo .vsm-mark-sub,
+.intro-done .login-rise, .no-intro .login-rise, .intro-done .login-word > span, .no-intro .login-word > span { animation: none; }
+.intro-done .login-logo .vsm-mark-sub, .no-intro .login-logo .vsm-mark-sub { opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .login-curtain { display: none; }
+  .login-logo, .login-logo .vsm-mark-sub, .login-rise, .login-word > span, .login-glow { animation: none !important; }
+  .login-logo .vsm-mark-sub { opacity: 0; }
+}
+@media (max-width: 640px) { .login-logo { top: 16px; right: 18px; font-size: 34px; }
+  @keyframes login-logo-move { from { transform: translate(calc(-50vw + 18px + 50%), calc(50vh - 16px - 50%)) scale(2.2); } to { transform: none; } } }
+
+/* ---------- Block 18.3 · brand loader + progress bar ---------- */
+.vsm-loader-mark { animation: vsm-breathe 1.8s ease-in-out infinite; }
+@keyframes vsm-breathe { 0%, 100% { opacity: .18; filter: blur(1px); transform: scale(.98); } 50% { opacity: 1; filter: none; transform: scale(1); } }
+.vsm-dots span { animation: vsm-dot 1.2s infinite; opacity: 0; }
+.vsm-dots span:nth-child(2) { animation-delay: .2s; } .vsm-dots span:nth-child(3) { animation-delay: .4s; }
+@keyframes vsm-dot { 0%, 20% { opacity: 0; } 50% { opacity: 1; } 100% { opacity: 0; } }
+.vsm-progress { position: fixed; left: 0; top: 0; z-index: 100; height: 2px; width: 0; background: #D7FF3A; box-shadow: 0 0 10px #D7FF3A; opacity: 0; transition: opacity .3s, width .3s; pointer-events: none; }
+.vsm-progress.is-active { opacity: 1; width: 85%; transition: width 8s cubic-bezier(.1,.8,.2,1), opacity .2s; }
+@media (prefers-reduced-motion: reduce) { .vsm-loader-mark, .vsm-dots span { animation: none; opacity: 1; filter: none; } }

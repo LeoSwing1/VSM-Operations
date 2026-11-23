@@ -1,20 +1,27 @@
 import { DEFAULT_TZ, eachDate, localDate, localMinutes, timeToMinutes, weekday } from "./time";
 
 export type AttendanceEventType = "CLOCK_IN" | "CLOCK_OUT" | "BREAK_START" | "BREAK_END";
-export interface AttendanceEvent { event_type: AttendanceEventType; occurred_at: string; source?: string }
-export interface ShiftPolicy {
-  start_time: string;        // "09:00"
-  end_time: string;          // "18:00"
-  grace_minutes: number;
-  half_day_minutes: number;  // worked minutes ≥ this → at least half day
-  full_day_minutes: number;  // worked minutes ≥ this → full day
-  weekly_offs: number[];     // 0 = Sunday
+export interface AttendanceEvent {
+  event_type: AttendanceEventType;
+  occurred_at: string;
+  source?: string;
 }
-export interface LeaveDay { date: string; paid: boolean; half: boolean }
+export interface ShiftPolicy {
+  start_time: string; // "09:00"
+  end_time: string; // "18:00"
+  grace_minutes: number;
+  half_day_minutes: number; // worked minutes ≥ this → at least half day
+  full_day_minutes: number; // worked minutes ≥ this → full day
+  weekly_offs: number[]; // 0 = Sunday
+}
+export interface LeaveDay {
+  date: string;
+  paid: boolean;
+  half: boolean;
+}
 
 export type DayStatus =
-  | "PRESENT" | "HALF_DAY" | "ABSENT" | "INCOMPLETE" | "LEAVE" | "HALF_LEAVE"
-  | "HOLIDAY" | "WEEKLY_OFF" | "NOT_EMPLOYED" | "UPCOMING";
+  "PRESENT" | "HALF_DAY" | "ABSENT" | "INCOMPLETE" | "LEAVE" | "HALF_LEAVE" | "HOLIDAY" | "WEEKLY_OFF" | "NOT_EMPLOYED" | "UPCOMING";
 
 export interface DaySummary {
   date: string;
@@ -35,7 +42,7 @@ export interface DaySummary {
 export interface AttendanceSummary {
   days: DaySummary[];
   workingDays: number;
-  presentDays: number;      // full + 0.5 × half
+  presentDays: number; // full + 0.5 × half
   absentDays: number;
   halfDays: number;
   lateArrivals: number;
@@ -45,32 +52,46 @@ export interface AttendanceSummary {
   totalBreakMinutes: number;
   leaveDays: number;
   lopDays: number;
-  attendancePct: number | null;   // null when there were no working days yet
+  attendancePct: number | null; // null when there were no working days yet
   punctualityPct: number | null;
 }
 
 /** Pair a single day's events into worked/break minutes. Robust to odd sequences. */
 export function summariseDayEvents(events: AttendanceEvent[], nowIso?: string) {
   const sorted = [...events].sort((a, b) => a.occurred_at.localeCompare(b.occurred_at));
-  let worked = 0, breaks = 0;
-  let inAt: number | null = null, breakAt: number | null = null;
-  let firstIn: string | null = null, lastOut: string | null = null;
+  let worked = 0,
+    breaks = 0;
+  let inAt: number | null = null,
+    breakAt: number | null = null;
+  let firstIn: string | null = null,
+    lastOut: string | null = null;
   for (const e of sorted) {
     const t = Date.parse(e.occurred_at);
     switch (e.event_type) {
       case "CLOCK_IN":
-        if (inAt === null) { inAt = t; firstIn ??= e.occurred_at; }
+        if (inAt === null) {
+          inAt = t;
+          firstIn ??= e.occurred_at;
+        }
         break;
       case "BREAK_START":
         if (inAt !== null && breakAt === null) breakAt = t;
         break;
       case "BREAK_END":
-        if (breakAt !== null) { breaks += t - breakAt; breakAt = null; }
+        if (breakAt !== null) {
+          breaks += t - breakAt;
+          breakAt = null;
+        }
         break;
       case "CLOCK_OUT":
         if (inAt !== null) {
-          if (breakAt !== null) { breaks += t - breakAt; breakAt = null; }
-          worked += t - inAt; inAt = null; lastOut = e.occurred_at;
+          if (breakAt !== null) {
+            breaks += t - breakAt;
+            breakAt = null;
+          }
+          worked += t - inAt;
+          inAt = null;
+          lastOut = e.occurred_at;
         }
         break;
     }
@@ -91,12 +112,13 @@ export function summariseAttendance(input: {
   shift: ShiftPolicy;
   /** Optional effective-dated shift override for each local work date. */
   shiftByDate?: Record<string, ShiftPolicy>;
-  start: string; end: string;           // inclusive local dates
+  start: string;
+  end: string; // inclusive local dates
   holidays: string[];
   leave: LeaveDay[];
   joiningDate: string;
   exitDate?: string | null;
-  today: string;                        // local date "now"
+  today: string; // local date "now"
   nowIso?: string;
   tz?: string;
 }): AttendanceSummary {
@@ -116,10 +138,18 @@ export function summariseAttendance(input: {
     const isToday = date === input.today;
     const s = summariseDayEvents(ev, isToday ? input.nowIso : undefined);
     const base: DaySummary = {
-      date, status: "ABSENT", firstIn: s.firstIn, lastOut: s.lastOut,
-      workedMinutes: s.workedMinutes, breakMinutes: s.breakMinutes,
-      lateMinutes: 0, earlyDepartureMinutes: 0, missingClockOut: false,
-      isWorkingDay: false, lop: 0, leavePaid: null,
+      date,
+      status: "ABSENT",
+      firstIn: s.firstIn,
+      lastOut: s.lastOut,
+      workedMinutes: s.workedMinutes,
+      breakMinutes: s.breakMinutes,
+      lateMinutes: 0,
+      earlyDepartureMinutes: 0,
+      missingClockOut: false,
+      isWorkingDay: false,
+      lop: 0,
+      leavePaid: null,
     };
     if (date < input.joiningDate || (input.exitDate && date > input.exitDate)) return { ...base, status: "NOT_EMPLOYED" };
     if (holidays.has(date)) return { ...base, status: "HOLIDAY" };
@@ -137,7 +167,7 @@ export function summariseAttendance(input: {
       base.missingClockOut = true;
       return { ...base, status: "INCOMPLETE", lop: l ? (l.paid ? 0 : 1) : 0.5 };
     }
-    if (isToday && s.open) return { ...base, status: "PRESENT" };   // in progress, judged at end of day
+    if (isToday && s.open) return { ...base, status: "PRESENT" }; // in progress, judged at end of day
 
     const fullDay = s.workedMinutes >= dayShift.full_day_minutes;
     const halfDay = !fullDay && s.workedMinutes >= dayShift.half_day_minutes;
@@ -160,8 +190,13 @@ export function summariseAttendance(input: {
   const arrived = working.filter((d) => d.firstIn);
   const late = arrived.filter((d) => d.lateMinutes > 0).length;
   const leaveDays = working.reduce((n, d) => n + (d.status === "LEAVE" ? 1 : d.status === "HALF_LEAVE" ? 0.5 : 0), 0);
-  const presentDays = present + half * 0.5 + working.filter((d) => d.status === "HALF_LEAVE" && d.workedMinutes >= (input.shiftByDate?.[d.date] ?? input.shift).half_day_minutes).length * 0.5
-    + working.filter((d) => d.status === "INCOMPLETE").length * 0.5;
+  const presentDays =
+    present +
+    half * 0.5 +
+    working.filter((d) => d.status === "HALF_LEAVE" && d.workedMinutes >= (input.shiftByDate?.[d.date] ?? input.shift).half_day_minutes)
+      .length *
+      0.5 +
+    working.filter((d) => d.status === "INCOMPLETE").length * 0.5;
   const expected = working.length - leaveDays;
 
   return {
@@ -195,4 +230,6 @@ export function nextActions(todayEvents: AttendanceEvent[]): AttendanceEventType
   return ["BREAK_START", "CLOCK_OUT"];
 }
 
-function round1(n: number) { return Math.round(n * 10) / 10; }
+function round1(n: number) {
+  return Math.round(n * 10) / 10;
+}

@@ -5,8 +5,14 @@
  */
 import { daysBetweenInclusive, maxDate, minDate } from "./time";
 
-export interface Money { name: string; amount: number }   // rupees
-export interface Slab { min: number; pct: number }          // score ≥ min → pct% of target
+export interface Money {
+  name: string;
+  amount: number;
+} // rupees
+export interface Slab {
+  min: number;
+  pct: number;
+} // score ≥ min → pct% of target
 
 export interface SalaryStructure {
   id: string;
@@ -17,28 +23,58 @@ export interface SalaryStructure {
   target_incentive: number;
   attendance_incentive: number;
 }
-export interface IncentivePolicy { id: string; slabs: Slab[]; cap_amount: number | null; prorate: boolean }
-export interface Snapshot { id: string; status: "DRAFT" | "APPROVED" | "SUPERSEDED"; final_score: number | null }
-export interface Adjustment { kind: "BONUS" | "REIMBURSEMENT" | "DEDUCTION"; label: string; amount: number; reason: string }
+export interface IncentivePolicy {
+  id: string;
+  slabs: Slab[];
+  cap_amount: number | null;
+  prorate: boolean;
+}
+export interface Snapshot {
+  id: string;
+  status: "DRAFT" | "APPROVED" | "SUPERSEDED";
+  final_score: number | null;
+}
+export interface Adjustment {
+  kind: "BONUS" | "REIMBURSEMENT" | "DEDUCTION";
+  label: string;
+  amount: number;
+  reason: string;
+}
 
 export interface PayrollInput {
-  periodStart: string; periodEnd: string;
-  joiningDate: string; exitDate?: string | null;
+  periodStart: string;
+  periodEnd: string;
+  joiningDate: string;
+  exitDate?: string | null;
   structure: SalaryStructure;
   policy: IncentivePolicy | null;
   snapshot: Snapshot | null;
-  lopDays: number;                    // from attendance engine, within employed days
+  lopDays: number; // from attendance engine, within employed days
   attendanceIncentiveEligible: boolean;
   adjustments: Adjustment[];
 }
 
-export interface Line { label: string; amount: number; kind: "EARNING" | "DEDUCTION" | "INFO"; note?: string }
+export interface Line {
+  label: string;
+  amount: number;
+  kind: "EARNING" | "DEDUCTION" | "INFO";
+  note?: string;
+}
 
 export interface PayrollResult {
-  periodDays: number; employedDays: number; lopDays: number; payableDays: number;
-  base: number; allowances: number; incentive: number; attendanceIncentive: number;
-  bonus: number; reimbursement: number; deductions: number;
-  gross: number; net: number;
+  periodDays: number;
+  employedDays: number;
+  lopDays: number;
+  payableDays: number;
+  base: number;
+  allowances: number;
+  incentive: number;
+  attendanceIncentive: number;
+  bonus: number;
+  reimbursement: number;
+  deductions: number;
+  gross: number;
+  net: number;
   lines: Line[];
   warnings: string[];
 }
@@ -47,7 +83,10 @@ const P = (rupees: number) => Math.round(rupees * 100);
 const R = (paise: number) => paise / 100;
 
 export const DEFAULT_SLABS: Slab[] = [
-  { min: 90, pct: 100 }, { min: 80, pct: 75 }, { min: 65, pct: 50 }, { min: 50, pct: 25 },
+  { min: 90, pct: 100 },
+  { min: 80, pct: 75 },
+  { min: 65, pct: 50 },
+  { min: 50, pct: 25 },
 ];
 
 export function validateSlabs(slabs: Slab[]): string[] {
@@ -77,16 +116,21 @@ export function calculatePayroll(i: PayrollInput): PayrollResult {
   const lopDays = Math.min(Math.max(0, i.lopDays), employedDays);
   const payableDays = employedDays - lopDays;
 
-  if (employedDays < periodDays) lines.push({ label: "Proration", amount: 0, kind: "INFO",
-    note: `Employed ${employedDays} of ${periodDays} days (${empStart} → ${empEnd})` });
+  if (employedDays < periodDays)
+    lines.push({
+      label: "Proration",
+      amount: 0,
+      kind: "INFO",
+      note: `Employed ${employedDays} of ${periodDays} days (${empStart} → ${empEnd})`,
+    });
   if (lopDays > 0) lines.push({ label: "Loss of pay", amount: 0, kind: "INFO", note: `${lopDays} unpaid day(s) from attendance/leave` });
 
   const factor = periodDays ? payableDays / periodDays : 0;
   const s = i.structure;
 
   const baseP = s.pay_type === "INCENTIVE_ONLY" ? 0 : Math.round(P(s.base_monthly) * factor);
-  if (s.pay_type !== "INCENTIVE_ONLY") lines.push({ label: "Base salary", amount: R(baseP), kind: "EARNING",
-    note: `${fmt(s.base_monthly)} × ${payableDays}/${periodDays}` });
+  if (s.pay_type !== "INCENTIVE_ONLY")
+    lines.push({ label: "Base salary", amount: R(baseP), kind: "EARNING", note: `${fmt(s.base_monthly)} × ${payableDays}/${periodDays}` });
 
   let allowP = 0;
   for (const a of s.allowances) {
@@ -123,13 +167,22 @@ export function calculatePayroll(i: PayrollInput): PayrollResult {
   let attP = 0;
   if (s.attendance_incentive > 0) {
     attP = i.attendanceIncentiveEligible && lopDays === 0 && employedDays === periodDays ? P(s.attendance_incentive) : 0;
-    lines.push({ label: "Attendance incentive", amount: R(attP), kind: "EARNING",
-      note: attP ? "Full attendance, no loss of pay" : "Not eligible this period" });
+    lines.push({
+      label: "Attendance incentive",
+      amount: R(attP),
+      kind: "EARNING",
+      note: attP ? "Full attendance, no loss of pay" : "Not eligible this period",
+    });
   }
 
-  let bonusP = 0, reimbP = 0, dedP = 0;
+  let bonusP = 0,
+    reimbP = 0,
+    dedP = 0;
   for (const a of i.adjustments) {
-    if (!(a.amount > 0)) { warnings.push(`Ignored non-positive adjustment "${a.label}"`); continue; }
+    if (!(a.amount > 0)) {
+      warnings.push(`Ignored non-positive adjustment "${a.label}"`);
+      continue;
+    }
     const v = P(a.amount);
     if (a.kind === "BONUS") bonusP += v;
     if (a.kind === "REIMBURSEMENT") reimbP += v;
@@ -144,16 +197,34 @@ export function calculatePayroll(i: PayrollInput): PayrollResult {
 
   const grossP = baseP + allowP + incP + attP + bonusP;
   let netP = grossP + reimbP - dedP;
-  if (netP < 0) { warnings.push("Deductions exceed earnings — net clamped to 0, review required"); netP = 0; }
+  if (netP < 0) {
+    warnings.push("Deductions exceed earnings — net clamped to 0, review required");
+    netP = 0;
+  }
 
-  lines.push({ label: "Statutory deductions", amount: 0, kind: "INFO",
-    note: "PF / ESI / PT / TDS are not auto-calculated. Configure them as approved deductions after professional review." });
+  lines.push({
+    label: "Statutory deductions",
+    amount: 0,
+    kind: "INFO",
+    note: "PF / ESI / PT / TDS are not auto-calculated. Configure them as approved deductions after professional review.",
+  });
 
   return {
-    periodDays, employedDays, lopDays, payableDays,
-    base: R(baseP), allowances: R(allowP), incentive: R(incP), attendanceIncentive: R(attP),
-    bonus: R(bonusP), reimbursement: R(reimbP), deductions: R(dedP),
-    gross: R(grossP), net: R(netP), lines, warnings,
+    periodDays,
+    employedDays,
+    lopDays,
+    payableDays,
+    base: R(baseP),
+    allowances: R(allowP),
+    incentive: R(incP),
+    attendanceIncentive: R(attP),
+    bonus: R(bonusP),
+    reimbursement: R(reimbP),
+    deductions: R(dedP),
+    gross: R(grossP),
+    net: R(netP),
+    lines,
+    warnings,
   };
 }
 

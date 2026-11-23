@@ -34,3 +34,14 @@ grant execute on function storage.foldername(text) to authenticated, service_rol
 
 create or replace function storage.extension(name text) returns text language sql immutable as $$ select lower(split_part(name,'.',array_length(string_to_array(name,'.'),1))) $$;
 grant execute on function storage.extension(text) to authenticated, service_role;
+
+-- Realtime (Supabase-managed in production) — minimal stand-in so 0019 policies apply locally.
+create schema if not exists realtime;
+create table if not exists realtime.messages (
+  id bigserial primary key, topic text, extension text, payload jsonb, private boolean, inserted_at timestamptz default now()
+);
+alter table realtime.messages enable row level security;
+create or replace function realtime.topic() returns text language sql stable as $$ select current_setting('realtime.topic', true) $$;
+grant usage on schema realtime to authenticated, service_role;
+grant all on realtime.messages to authenticated, service_role;
+do $$ begin create publication supabase_realtime; exception when duplicate_object then null; end $$;

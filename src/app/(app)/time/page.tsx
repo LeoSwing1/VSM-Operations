@@ -1,8 +1,179 @@
-import { requireContext,canAny } from "@/lib/auth"; import {supabaseServer} from "@/lib/supabase/server"; import {Badge,Card,Empty,Field,Flash,PageHeader,TableWrap} from "@/components/ui"; import {submitTime,decideTime} from "./actions"; import {fmtDate,localDate} from "@/lib/engines/time";
-export const metadata={title:"Time tracking"};
-export default async function TimePage({searchParams}:{searchParams:Promise<Record<string,string|undefined>>}){const sp=await searchParams,ctx=await requireContext(),sb=await supabaseServer(); const from=/^\d{4}-\d{2}-\d{2}$/.test(sp.from??"")?sp.from!:localDate(new Date(Date.now()-30*86400000),ctx.timezone),to=/^\d{4}-\d{2}-\d{2}$/.test(sp.to??"")?sp.to!:localDate(new Date(),ctx.timezone); const canTeam=canAny(ctx,["time.view_all","time.view_team","time.approve_all","time.approve_team"]);
- const [{data:entries},{data:tasks}]=await Promise.all([sb.from("task_time_entries").select("id,employee_id,work_date,minutes,description,billable,status,task:tasks(title),project:projects(name),employee:employees!task_time_entries_employee_id_fkey(full_name)").gte("work_date",from).lte("work_date",to).order("work_date",{ascending:false}).limit(250),sb.from("tasks").select("id,title").eq("assignee_id",ctx.employee_id).order("title")]);
- const visible=(entries??[]).filter((e:any)=>canTeam||e.employee_id===ctx.employee_id); const canApprove=canAny(ctx,["time.approve_all","time.approve_team"]);
- return <><PageHeader eyebrow="Workforce operations" title="Time tracking"><a className="btn-ghost" href={`/api/reports/time?from=${from}&to=${to}`}>Export CSV</a><a className="btn-ghost" href="/attendance">Attendance →</a></PageHeader><Flash sp={sp}/>
- <div className="grid gap-6 xl:grid-cols-[380px_1fr]"><Card title="Log work time" hint="Log time against tasks assigned to you. Project-only time is recorded in the project workspace."><form action={submitTime} className="grid gap-3"><Field label="Work date"><input type="date" name="work_date" className="input" required defaultValue={new Date().toLocaleDateString("en-CA",{timeZone:ctx.timezone})}/></Field><Field label="Duration (minutes)"><input type="number" name="minutes" min="1" max="1440" className="input" required/></Field><Field label="Task"><select name="task_id" className="input" required><option value="">Select assigned task</option>{(tasks??[]).map(t=><option key={t.id} value={t.id}>{t.title}</option>)}</select></Field><Field label="Work description"><textarea name="description" className="input" rows={3} minLength={3} required/></Field><label className="flex items-center gap-2 text-sm"><input type="checkbox" name="billable"/> Billable time</label><button className="btn-primary">Submit time</button></form></Card>
- <Card title="Timesheet register" hint="Pending entries require manager approval. Approved hours feed task delivery reporting; finance allocation remains a separate approval workflow."><form method="get" className="mb-4 flex flex-wrap items-end gap-2"><Field label="From"><input type="date" name="from" defaultValue={from} className="input"/></Field><Field label="To"><input type="date" name="to" defaultValue={to} className="input"/></Field><button className="btn-ghost">Filter</button></form>{!visible.length?<Empty title="No time entries" hint="Submit your first work-time entry."/>:<TableWrap><table className="table min-w-[800px]"><thead><tr><th>Date</th><th>Employee</th><th>Task / project</th><th>Work</th><th>Hours</th><th>Billable</th><th>Status</th><th/></tr></thead><tbody>{visible.map((e:any)=><tr key={e.id}><td>{fmtDate(e.work_date)}</td><td>{e.employee?.full_name??"—"}</td><td>{e.task?.title??e.project?.name??"—"}</td><td className="max-w-[220px] truncate">{e.description}</td><td>{(e.minutes/60).toFixed(2)}</td><td>{e.billable?"Yes":"No"}</td><td><Badge>{e.status}</Badge></td><td>{canApprove&&e.status==="PENDING"&&e.employee_id!==ctx.employee_id&&<div className="flex gap-1">{["approve","reject"].map(d=><form action={decideTime} key={d}><input type="hidden" name="id" value={e.id}/><input type="hidden" name="decision" value={d}/><button className="btn-ghost px-2 py-1 text-xs">{d}</button></form>)}</div>}</td></tr>)}</tbody></table></TableWrap>}</Card></div></>}
+import { requireContext, canAny } from "@/lib/auth";
+import { supabaseServer } from "@/lib/supabase/server";
+import { Badge, Card, Empty, Field, Flash, PageHeader, TableWrap } from "@/components/ui";
+import { submitTime, decideTime, startTaskTimer } from "./actions";
+import { RunningTimer } from "./running-timer";
+import { fmtDate, localDate } from "@/lib/engines/time";
+export const metadata = { title: "Time tracking" };
+export default async function TimePage({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
+  const sp = await searchParams,
+    ctx = await requireContext(),
+    sb = await supabaseServer();
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(sp.from ?? "") ? sp.from! : localDate(new Date(Date.now() - 30 * 86400000), ctx.timezone),
+    to = /^\d{4}-\d{2}-\d{2}$/.test(sp.to ?? "") ? sp.to! : localDate(new Date(), ctx.timezone);
+  const canTeam = canAny(ctx, ["time.view_all", "time.view_team", "time.approve_all", "time.approve_team"]);
+  const [{ data: entries }, { data: tasks }, { data: activeTimer }] = await Promise.all([
+    sb
+      .from("task_time_entries")
+      .select(
+        "id,employee_id,work_date,minutes,description,billable,status,task:tasks(title),project:projects(name),employee:employees!task_time_entries_employee_id_fkey(full_name)",
+      )
+      .gte("work_date", from)
+      .lte("work_date", to)
+      .or("started_at.is.null,ended_at.not.is.null")
+      .order("work_date", { ascending: false })
+      .limit(250),
+    sb.from("tasks").select("id,title").eq("assignee_id", ctx.employee_id).order("title"),
+    sb
+      .from("task_time_entries")
+      .select("id,started_at,task:tasks(title)")
+      .eq("employee_id", ctx.employee_id)
+      .not("started_at", "is", null)
+      .is("ended_at", null)
+      .limit(1)
+      .maybeSingle(),
+  ]);
+  const visible = (entries ?? []).filter((e: any) => canTeam || e.employee_id === ctx.employee_id);
+  const canApprove = canAny(ctx, ["time.approve_all", "time.approve_team"]);
+  return (
+    <>
+      <PageHeader eyebrow="Workforce operations" title="Time tracking">
+        <a className="btn-ghost" href={`/api/reports/time?from=${from}&to=${to}&format=csv`}>
+          CSV
+        </a>
+        <a className="btn-ghost" href={`/api/reports/time?from=${from}&to=${to}&format=xlsx`}>
+          Excel
+        </a>
+        <a className="btn-ghost" href={`/api/reports/time?from=${from}&to=${to}&format=pdf`}>
+          PDF
+        </a>
+        <a className="btn-ghost" href="/attendance">
+          Attendance →
+        </a>
+      </PageHeader>
+      <Flash sp={sp} />
+      <div className="space-y-4">
+        {activeTimer && (
+          <RunningTimer id={activeTimer.id} startedAt={activeTimer.started_at} taskTitle={(activeTimer as any).task?.title ?? "Task"} />
+        )}
+        <div className="grid gap-6 xl:grid-cols-[380px_1fr]">
+          <Card title="Start a task timer" hint="Server-timestamped sessions; stopping submits elapsed time for approval.">
+            <form action={startTaskTimer} className="flex flex-wrap items-end gap-3">
+              <Field label="Assigned task">
+                <select name="task_id" className="input min-w-64" required>
+                  <option value="">Select task</option>
+                  {(tasks ?? []).map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.title}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <button className="btn-ghost" disabled={!!activeTimer}>
+                Start timer
+              </button>
+            </form>
+          </Card>
+          <Card
+            title="Log work time"
+            hint="Log time against tasks assigned to you. Project-only time is recorded in the project workspace."
+          >
+            <form action={submitTime} className="grid gap-3">
+              <Field label="Work date">
+                <input
+                  type="date"
+                  name="work_date"
+                  className="input"
+                  required
+                  defaultValue={new Date().toLocaleDateString("en-CA", { timeZone: ctx.timezone })}
+                />
+              </Field>
+              <Field label="Duration (minutes)">
+                <input type="number" name="minutes" min="1" max="1440" className="input" required />
+              </Field>
+              <Field label="Task">
+                <select name="task_id" className="input" required>
+                  <option value="">Select assigned task</option>
+                  {(tasks ?? []).map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.title}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Work description">
+                <textarea name="description" className="input" rows={3} minLength={3} required />
+              </Field>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" name="billable" /> Billable time
+              </label>
+              <button className="btn-primary">Submit time</button>
+            </form>
+          </Card>
+          <Card
+            title="Timesheet register"
+            hint="Pending entries require manager approval. Approved hours feed task delivery reporting; finance allocation remains a separate approval workflow."
+          >
+            <form method="get" className="mb-4 flex flex-wrap items-end gap-2">
+              <Field label="From">
+                <input type="date" name="from" defaultValue={from} className="input" />
+              </Field>
+              <Field label="To">
+                <input type="date" name="to" defaultValue={to} className="input" />
+              </Field>
+              <button className="btn-ghost">Filter</button>
+            </form>
+            {!visible.length ? (
+              <Empty title="No time entries" hint="Submit your first work-time entry." />
+            ) : (
+              <TableWrap>
+                <table className="table min-w-[800px]">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Employee</th>
+                      <th>Task / project</th>
+                      <th>Work</th>
+                      <th>Hours</th>
+                      <th>Billable</th>
+                      <th>Status</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visible.map((e: any) => (
+                      <tr key={e.id}>
+                        <td>{fmtDate(e.work_date)}</td>
+                        <td>{e.employee?.full_name ?? "—"}</td>
+                        <td>{e.task?.title ?? e.project?.name ?? "—"}</td>
+                        <td className="max-w-[220px] truncate">{e.description}</td>
+                        <td>{(e.minutes / 60).toFixed(2)}</td>
+                        <td>{e.billable ? "Yes" : "No"}</td>
+                        <td>
+                          <Badge>{e.status}</Badge>
+                        </td>
+                        <td>
+                          {canApprove && e.status === "PENDING" && e.employee_id !== ctx.employee_id && (
+                            <div className="flex gap-1">
+                              {["approve", "reject"].map((d) => (
+                                <form action={decideTime} key={d}>
+                                  <input type="hidden" name="id" value={e.id} />
+                                  <input type="hidden" name="decision" value={d} />
+                                  <button className="btn-ghost px-2 py-1 text-xs">{d}</button>
+                                </form>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </TableWrap>
+            )}
+          </Card>
+        </div>
+      </div>
+    </>
+  );
+}

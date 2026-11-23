@@ -1,0 +1,19 @@
+{
+  "name": "VSM Growth Operations",
+  "short_name": "VSM Ops",
+  "description": "People, attendance, work, chat and clients for VSM Growth & VSM Scholars.",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0B0B0C",
+  "theme_color": "#0B0B0C",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Clock in / out", "url": "/attendance" },
+    { "name": "Team chat", "url": "/chat" },
+    { "name": "Operations Center", "url": "/operations" }
+  ]
+}

@@ -42,7 +42,7 @@ Important existing implementation areas:
 | Recruitment & onboarding | Candidate pipeline, interview scheduling/feedback, atomic candidate-to-employee conversion and onboarding checklist | **Partial.** Add candidate CV upload/communication, candidate-side offer sign-off, reusable onboarding templates and automated notifications. Employee letter records are available in Employee 360. |
 | Documents & compliance | Private employee Storage bucket, metadata, organization/employee-bound paths, RLS, short-lived signed URLs and printable employment letters | **Partial.** Add expiry reminders, retention/legal hold, document versioning and server-side PDF archiving. |
 | Reports & analytics | Attendance/payroll API reports and personal performance analytics | **Partial.** Build role-scoped report centre, filters, CSV/XLSX/PDF exports and the missing finance/project/HR reports. |
-| Settings & integrations | Access control, roles, attendance settings, audit logs and integrations routes | **Partial / strong foundation.** Add organization profile, payroll policies, document settings, notification templates and integration health for future providers. |
+| Settings & integrations | Access control, roles, attendance settings, audit logs and Block 13 Integration Control Centre with database, Storage, Auth Admin and Realtime diagnostics, calendar OAuth readiness, cron heartbeat, email outbox and check history | **Partial / strong foundation.** Add organization profile, payroll policies, document settings, notification templates, webhook management and incident/SLA views. |
 
 ## 3. Security and payroll decisions to preserve
 
@@ -128,8 +128,32 @@ A module is complete only when all applicable items exist:
 
 ## 7. Immediate next action
 
-Complete Phase 0 validation against migrations 0001–0013 first. Once verified, proceed with expanded Executive ERP trends, profitability and the central report centre. Do not expose navigation links to unfinished modules or present placeholder data as live business metrics.
+Complete Phase 0 validation against migrations 0001–0018 first. Once verified, proceed with expanded Executive ERP trends, profitability and the central report centre. Do not expose navigation links to unfinished modules or present placeholder data as live business metrics.
 
 ## Block 08 — Workforce collaboration layer
 
 Added formal team and working-group structures, effective-dated shifts used by attendance reporting, task/project work-time allocation and approvals, quality assessments, calendar invitations and attendee responses, and meeting records. Attendance remains punch-based; time allocation remains a separate approved timesheet. Implementation and explicit non-goals are documented in `docs/blocks/BLOCK-08.md`.
+
+## Block 09 — Advanced calendar, attendance, evidence and exports
+
+- Month/week/day calendar navigation and bounded recurring meeting automation.
+- Google Calendar and Microsoft Outlook OAuth with encrypted token storage, bidirectional rolling-window sync, private inbound event imports, duplicate mapping and scheduled sync.
+- Asynchronous email invitations with an atomic queue claim, retry backoff and delivery status tracking.
+- Mobile-responsive attendance clocking and task timer-based timesheets.
+- Private quality assessment evidence with SHA-256 metadata and short-lived signed download URLs.
+- Standardised CSV, XLSX and PDF reporting for attendance, time, finance, payroll and quality; RFC 5545 ICS calendar export.
+
+## Block 10 — Workflow automation and SLA queue
+
+Adds a tenant-scoped rule registry and durable run queue with idempotency, bounded retries, lock recovery, RLS and service-role worker contracts. UI builder, typed action execution and automatic event wiring remain follow-on work; see `docs/blocks/BLOCK-10.md`.
+
+
+## Block 11 — Workflow builder and typed execution
+
+- Added administrator workflow configuration at `/settings/workflows` with event selection, typed notification action, pause/enable and deletion.
+- Task creation emits the first live `task.created` event. Event actor and organisation are verified by PostgreSQL; queue entries are idempotent.
+- Service-role cron worker validates active tenant actor and writes deduplicated in-app notifications.
+- Only `notify_actor` is executable in this block; remaining event keys are reserved until business modules emit them. No visual drag-and-drop editor, condition builder, email/webhook actions or manager escalation is claimed.
+
+## Block 16 workflow approval capability
+Workflow rules now support typed actor, target and manager notifications plus manager approval creation. Approval cases are durable, organisation-scoped and exposed in the Approvals inbox with assigned-approver decisions. The protected workflow cron escalates overdue cases through the employee manager hierarchy for at most three levels. See `docs/blocks/BLOCK-16.md` for constraints and deployment steps.
