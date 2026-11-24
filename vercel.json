@@ -1,31 +1,11 @@
 {
-  "regions": [
-    "hnd1"
-  ],
+  "regions": ["bom1"],
   "crons": [
-    {
-      "path": "/api/cron/email",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/digest",
-      "schedule": "30 13 * * *"
-    },
-    {
-      "path": "/api/cron/calendar-invitations",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/calendar-sync",
-      "schedule": "*/15 * * * *"
-    },
-    {
-      "path": "/api/cron/workflows",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/reports",
-      "schedule": "*/15 * * * *"
-    }
+    { "path": "/api/cron/email", "schedule": "0 2 * * *" },
+    { "path": "/api/cron/digest", "schedule": "30 13 * * *" },
+    { "path": "/api/cron/calendar-invitations", "schedule": "10 2 * * *" },
+    { "path": "/api/cron/calendar-sync", "schedule": "20 2 * * *" },
+    { "path": "/api/cron/workflows", "schedule": "30 2 * * *" },
+    { "path": "/api/cron/reports", "schedule": "40 19 * * *" }
   ]
 }
