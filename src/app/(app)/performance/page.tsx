@@ -6,6 +6,7 @@ import { Badge, Card, Empty, Field, Flash, PageHeader, TableWrap, Tabs } from "@
 import { fmtDate, localDate, monthBounds, shiftMonth } from "@/lib/engines/time";
 import { DEFAULT_WEIGHTS, METRIC_KEYS, METRIC_LABELS } from "@/lib/engines/performance";
 import { adjustSnapshot, approveSnapshot, createSnapshot, respondReviewRequest, savePolicy, submitReview } from "./actions";
+import { DecisionButtons } from "@/components/decision-buttons";
 
 export const metadata = { title: "Performance" };
 
@@ -199,12 +200,12 @@ async function RequestsTab({ sb }: { sb: SB }) {
             <form action={respondReviewRequest} className="mt-3 flex flex-wrap gap-2">
               <input type="hidden" name="id" value={r.id} />
               <input name="response" className="input flex-1" placeholder="Your response" />
-              <button name="decision" value="approve" className="btn-primary">
-                Accept
-              </button>
-              <button name="decision" value="reject" className="btn-ghost">
-                Decline
-              </button>
+              <DecisionButtons
+                choices={[
+                  { value: "approve", label: "Accept", className: "btn-primary" },
+                  { value: "reject", label: "Decline", className: "btn-ghost" },
+                ]}
+              />
             </form>
           ) : (
             r.response && <p className="mt-3 text-xs text-muted">Response: {r.response}</p>

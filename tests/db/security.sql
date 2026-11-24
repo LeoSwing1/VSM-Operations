@@ -1174,6 +1174,68 @@ reset role;
 select t_ok((select count(*) from chat_channel_members where employee_id = :'e_b' and last_delivered_at > now() - interval '1 minute') = (select count(*) from chat_channel_members where employee_id = :'e_b'), 'opening the app marks your chats delivered');
 select set_config('request.jwt.claim.sub', '', false);
 
+-- 0040: salary day, team tasks, unread chat reminder emails
+-- Salary day
+select t_ok(default_salary_day('2027-01-01') = 8 and default_salary_day('2026-11-28') = 5, 'salary day defaults to joining date + 7 days');
+select t_ok(next_salary_date(31, '2027-02-10') = '2027-02-28' and next_salary_date(8, '2026-11-24') = '2026-12-08', 'next salary date clamps to short months');
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+insert into employees(org_id, full_name, official_email, role, joining_date, salary_day) values (:'org', 'Pay Day', 'payday@vsm.test', 'EMPLOYEE', '2027-01-01', 15);
+insert into employees(org_id, full_name, official_email, role, joining_date) values (:'org', 'Auto Day', 'autoday@vsm.test', 'EMPLOYEE', '2027-01-01');
+reset role;
+select t_ok((select salary_day from employees where official_email = 'payday@vsm.test') = 15, 'HR can set a custom salary day when adding someone');
+select t_ok((select salary_day from employees where official_email = 'autoday@vsm.test') = 8, 'left blank, the salary day is joining + 7 days (1 Jan → 8th)');
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+insert into employees(org_id, full_name, official_email, role, manager_id, joining_date, salary_day) values (:'org', 'Mgr Pick', 'mgrpick@vsm.test', 'EMPLOYEE', :'e_m', '2027-01-01', 2);
+reset role;
+select t_ok((select salary_day from employees where official_email = 'mgrpick@vsm.test') = 8, 'only HR/payroll choose a custom salary day; managers get the default');
+update employees set joining_date = '2027-03-10' where official_email = 'autoday@vsm.test';
+select t_ok((select salary_day from employees where official_email = 'autoday@vsm.test') = 17, 'a default salary day follows a corrected joining date');
+
+-- Team tasks
+insert into org_teams(org_id, name, lead_employee_id, created_by) values (:'org', 'SEO Test Squad', :'e_m', :'e_s') returning id as seo \gset
+insert into org_team_members(org_id, team_id, employee_id, member_role) values (:'org', :'seo', :'e_m', 'LEAD'), (:'org', :'seo', :'e_a', 'MEMBER'), (:'org', :'seo', :'e_f', 'MEMBER');
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_denied(format($$select create_team_task(%L, 'EACH', 'x x', null, 'MEDIUM', null, null, null)$$, :'seo'), 'employees cannot give work to a team');
+reset role;
+select set_config('request.jwt.claim.sub', :'O', false); set role authenticated;
+select t_denied(format($$select create_team_task(%L, 'EACH', 'x x', null, 'MEDIUM', null, null, null)$$, :'seo'), 'a lead of another team cannot give work to this team');
+reset role;
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select t_ok(create_team_task(:'seo', 'EACH', 'Monthly SEO audit', null, 'HIGH', null, 2, null) = 2, 'the team lead gives a copy to each member');
+select create_team_task(:'seo', 'SHARED', 'Fix client GMB listing', null, 'MEDIUM', null, null, null);
+reset role;
+select id as shared from tasks where title = 'Fix client GMB listing' \gset
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok((select count(*) from tasks where id = :'shared') = 1, 'team members see the shared task in the pool');
+select claim_team_task(:'shared');
+select t_denied(format($$select claim_team_task(%L)$$, :'shared'), 'a claimed task cannot be claimed again');
+reset role;
+select t_ok((select assignee_id = :'e_a' from tasks where id = :'shared'), 'the first member to claim owns it');
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((select count(*) from tasks where id = :'shared') = 0, 'people outside the team do not see its tasks');
+reset role;
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_ok(create_team_task(:'seo', 'EACH', 'Submit appraisal form', null, 'LOW', null, null, null) = 3, 'HR can give work to any team');
+reset role;
+
+-- Unread chat reminders
+select set_config('request.jwt.claim.sub', '', false);
+insert into chat_channels(org_id, name, channel_type, direct_key, created_by) values (:'org', 'Direct message', 'DIRECT', 'rem-test', :'e_m') returning id as dmc \gset
+insert into chat_channel_members(channel_id, employee_id) values (:'dmc', :'e_m'), (:'dmc', :'e_b') on conflict do nothing;
+insert into chat_messages(org_id, channel_id, author_id, body, created_at) values (:'org', :'dmc', :'e_m', 'Old one', now() - interval '3 hours');
+select t_ok(chat_send_unread_reminders(2) >= 1, 'messages unseen for 2+ hours trigger a reminder');
+select t_ok((select count(*) from email_outbox where template = 'chat.unread_reminder' and recipient_employee_id = :'e_b' and payload::text not like '%Old one%') = 1, 'the reminder email names the chat, never the message text');
+select t_ok(chat_send_unread_reminders(2) = 0, 'no repeat email until new messages wait 2 hours');
+update chat_channel_members set last_read_at = now() where channel_id = :'dmc' and employee_id = :'e_b';
+insert into chat_messages(org_id, channel_id, author_id, body, created_at) values (:'org', :'dmc', :'e_m', 'Fresh', now() - interval '10 minutes');
+select t_ok(chat_send_unread_reminders(2) = 0, 'messages waiting under 2 hours do not trigger an email');
+insert into notification_preferences(org_id, employee_id, category, channel, mode) values (:'org', :'e_a', 'CHAT', 'EMAIL', 'MUTED')
+  on conflict (employee_id, category, channel) do update set mode = 'MUTED';
+insert into chat_messages(org_id, channel_id, author_id, body, created_at)
+  select :'org', c.id, :'e_m', 'Hello SEO', now() - interval '3 hours' from chat_channels c where c.channel_type <> 'DIRECT' and exists (select 1 from chat_channel_members x where x.channel_id = c.id and x.employee_id = :'e_a') limit 1;
+select chat_send_unread_reminders(2);
+select t_ok(not exists (select 1 from email_outbox where template = 'chat.unread_reminder' and recipient_employee_id = :'e_a'), 'people who muted chat emails get no reminder');
+
 -- Smoke: every public table is readable (subject to RLS) by every persona without policy errors.
 create or replace function t_sweep(label text) returns void language plpgsql as $$
 declare t record; n int;

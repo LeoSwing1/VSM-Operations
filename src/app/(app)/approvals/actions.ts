@@ -1,13 +1,13 @@
 "use server";
 import { requireContext } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
-import { dbMessage, flash, optStr, str } from "@/lib/actions";
+import { dbMessage, decisionOf, flash, optStr, str } from "@/lib/actions";
 
 export async function decide(fd: FormData) {
   await requireContext();
   const kind = str(fd, "kind"),
     id = str(fd, "id"),
-    approve = str(fd, "decision") === "approve",
+    approve = decisionOf(fd, "/approvals"),
     note = optStr(fd, "note");
   const sb = await supabaseServer();
   const rpc = kind === "leave" ? "decide_leave" : kind === "correction" ? "decide_attendance_correction" : null;
@@ -33,13 +33,14 @@ export async function decide(fd: FormData) {
         p_metadata: { event_key: "leave.decided", error: workflowError.message.slice(0, 300) },
       });
   }
-  flash("/approvals", "ok", approve ? "Approved." : "Rejected.");
+  const saved = (decision as { status?: string } | null)?.status;
+  flash("/approvals", "ok", saved ? `Saved as ${saved}.` : approve ? "Approved." : "Rejected.");
 }
 
 export async function decideWorkflowApproval(fd: FormData) {
   await requireContext();
   const id = str(fd, "id"),
-    approve = str(fd, "decision") === "approve",
+    approve = decisionOf(fd, "/approvals"),
     note = optStr(fd, "note");
   const sb = await supabaseServer();
   const { error } = await sb

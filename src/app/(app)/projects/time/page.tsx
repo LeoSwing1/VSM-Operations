@@ -3,6 +3,7 @@ import { requirePerm } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
 import { Badge, Card, Empty, Field, Flash, PageHeader, TableWrap } from "@/components/ui";
 import { decideProjectTime } from "../actions";
+import { DecisionButtons } from "@/components/decision-buttons";
 export const metadata = { title: "Project time approvals" };
 export default async function ProjectTime({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
   const sp = await searchParams;
@@ -69,12 +70,13 @@ export default async function ProjectTime({ searchParams }: { searchParams: Prom
                       {t.status === "SUBMITTED" ? (
                         <form action={decideProjectTime} className="flex flex-wrap gap-1">
                           <input type="hidden" name="id" value={t.id} />
-                          <button name="decision" value="approve" className="btn-primary px-2 py-1 text-xs">
-                            Approve
-                          </button>
-                          <button name="decision" value="reject" className="btn-ghost px-2 py-1 text-xs">
-                            Reject
-                          </button>
+                          <DecisionButtons
+                            small
+                            choices={[
+                              { value: "approve", label: "Approve", className: "btn-primary" },
+                              { value: "reject", label: "Reject", className: "btn-ghost" },
+                            ]}
+                          />
                         </form>
                       ) : (
                         "—"

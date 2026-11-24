@@ -1,8 +1,9 @@
 import Link from "next/link";
 import { requireContext } from "@/lib/auth";
+import { fmtDate, localDate } from "@/lib/engines/time";
+import { nextSalaryDate, ordinal } from "@/lib/engines/salary-day";
 import { supabaseServer } from "@/lib/supabase/server";
 import { Badge, Card, Empty, PageHeader, Stat, TableWrap, inr } from "@/components/ui";
-import { fmtDate } from "@/lib/engines/time";
 
 export const metadata = { title: "My salary" };
 
@@ -10,7 +11,7 @@ export default async function MySalary() {
   const ctx = await requireContext();
   const sb = await supabaseServer();
   // RLS returns ONLY the caller's rows; the explicit filter is belt-and-braces.
-  const [{ data: structs }, { data: slips }] = await Promise.all([
+  const [{ data: structs }, { data: slips }, { data: me }] = await Promise.all([
     sb
       .from("salary_structures")
       .select("id, effective_from, effective_to, pay_type, base_monthly, allowances, deductions, target_incentive, attendance_incentive")
@@ -21,7 +22,9 @@ export default async function MySalary() {
       .select("id, run_id, gross_amount, net_amount, incentive_amount, payment_status, paid_on, created_at")
       .eq("employee_id", ctx.employee_id)
       .order("created_at", { ascending: false }),
+    sb.from("employees").select("salary_day").eq("id", ctx.employee_id).maybeSingle(),
   ]);
+  const payDay = (me?.salary_day as number | null) ?? null;
   await sb.rpc("log_salary_access", {
     p_entity: "employee",
     p_entity_id: ctx.employee_id,
@@ -33,7 +36,13 @@ export default async function MySalary() {
 
   return (
     <>
-      <PageHeader eyebrow="Private to you" title="My salary" />
+      <PageHeader eyebrow="Private to you" title="My salary">
+        {payDay && (
+          <span className="btn pointer-events-none border border-line">
+            Salary day: {ordinal(payDay)} · next {fmtDate(nextSalaryDate(payDay, localDate(new Date(), ctx.timezone)))}
+          </span>
+        )}
+      </PageHeader>
       {!cur ? (
         <Empty title="No salary structure on file" hint="Contact HR if you think this is wrong." />
       ) : (

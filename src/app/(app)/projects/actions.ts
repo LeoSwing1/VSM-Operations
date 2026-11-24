@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { requirePerm } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
-import { dbMessage, flash, num, optStr, str } from "@/lib/actions";
+import { dbMessage, flash, num, optStr, str, decisionOf } from "@/lib/actions";
 
 export async function createProjectWorkspace(fd: FormData) {
   const ctx = await requirePerm("projects.manage");
@@ -151,7 +151,7 @@ export async function logProjectTime(fd: FormData) {
 export async function decideProjectTime(fd: FormData) {
   await requirePerm("projects.time_approve", "projects.manage");
   const id = str(fd, "id"),
-    approve = str(fd, "decision") === "approve";
+    approve = decisionOf(fd, "/projects/time");
   const sb = await supabaseServer();
   const { error } = await sb.rpc("decide_project_time_entry", { p_entry: id, p_approve: approve, p_note: optStr(fd, "note") });
   if (error) flash("/projects/time", "err", dbMessage(error));

@@ -3,7 +3,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { requireContext, requirePerm } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
-import { dbMessage, flash, optStr, str } from "@/lib/actions";
+import { dbMessage, flash, optStr, str, decisionOf } from "@/lib/actions";
 import { localDate } from "@/lib/engines/time";
 export async function submitTime(fd: FormData) {
   const ctx = await requireContext();
@@ -65,7 +65,7 @@ export async function submitTime(fd: FormData) {
 export async function decideTime(fd: FormData) {
   await requirePerm("time.approve_all", "time.approve_team");
   const sb = await supabaseServer();
-  const { error } = await sb.rpc("decide_task_time_entry", { p_id: str(fd, "id"), p_approve: str(fd, "decision") === "approve" });
+  const { error } = await sb.rpc("decide_task_time_entry", { p_id: str(fd, "id"), p_approve: decisionOf(fd, "/time") });
   if (error) flash("/time", "err", dbMessage(error));
   revalidatePath("/time");
   flash("/time", "ok", "Time entry decision saved.");

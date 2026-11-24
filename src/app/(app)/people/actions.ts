@@ -23,6 +23,7 @@ const Employee = z.object({
   phone: z.string().trim().max(20).nullable(),
   shift_id: z.string().uuid().nullable(),
   work_location: z.string().trim().max(120).nullable(),
+  salary_day: z.number().int().min(1, "Salary day: 1–31").max(31, "Salary day: 1–31").nullable(),
 });
 
 function read(fd: FormData) {
@@ -39,6 +40,8 @@ function read(fd: FormData) {
     phone: optStr(fd, "phone"),
     shift_id: optStr(fd, "shift_id"),
     work_location: optStr(fd, "work_location"),
+    // Blank = automatic (joining date + 7 days), set by the database.
+    salary_day: str(fd, "salary_day") ? Number(str(fd, "salary_day")) : null,
   });
 }
 

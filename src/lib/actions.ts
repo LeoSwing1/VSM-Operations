@@ -38,3 +38,14 @@ export function num(fd: FormData, k: string): number | null {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
+
+/**
+ * Read an approve/reject choice strictly. A missing or unknown value is an error, never a silent rejection
+ * (that bug saved approved attendance corrections as REJECTED).
+ */
+export function decisionOf(fd: FormData, back: string, approveValue = "approve", rejectValue = "reject"): boolean {
+  const d = str(fd, "decision");
+  if (d === approveValue) return true;
+  if (d === rejectValue) return false;
+  flash(back, "err", "Choose Approve or Reject — nothing was changed.");
+}

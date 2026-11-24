@@ -3,7 +3,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { requireContext, requirePerm } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
-import { dbMessage, flash, num, optStr, str } from "@/lib/actions";
+import { dbMessage, flash, num, optStr, str, decisionOf } from "@/lib/actions";
 import { zonedInstant } from "@/lib/engines/time";
 
 const NewTask = z.object({
@@ -79,7 +79,7 @@ export async function moveTask(fd: FormData) {
 export async function reviewTask(fd: FormData) {
   await requirePerm("tasks.review");
   const back = str(fd, "back") || "/approvals";
-  const approve = str(fd, "decision") === "approve";
+  const approve = decisionOf(fd, back);
   const quality = num(fd, "quality");
   const sb = await supabaseServer();
   const { error } = await sb.rpc("review_task", {
@@ -112,4 +112,65 @@ export async function createProject(fd: FormData) {
   if (error) flash("/tasks", "err", dbMessage(error));
   await sb.from("project_members").insert({ project_id: data.id, employee_id: ctx.employee_id });
   flash("/tasks", "ok", "Project created.");
+}
+
+/** Give work to a whole team: a copy for each member, or one shared task the first member claims. */
+export async function createTeamTask(fd: FormData) {
+  const ctx = await requireContext();
+  const p = z
+    .object({
+      team_id: z.string().uuid(),
+      mode: z.enum(["EACH", "SHARED"]),
+      title: z.string().trim().min(2).max(300),
+      description: z.string().trim().max(5000).nullable(),
+      project_id: z.string().uuid().nullable(),
+      priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]),
+      deadline: z.string().nullable(),
+      estimated_hours: z.number().min(0).max(999).nullable(),
+    })
+    .safeParse({
+      team_id: str(fd, "team_id"),
+      mode: str(fd, "mode") || "EACH",
+      title: str(fd, "title"),
+      description: optStr(fd, "description"),
+      project_id: optStr(fd, "project_id"),
+      priority: str(fd, "priority") || "MEDIUM",
+      deadline: optStr(fd, "deadline"),
+      estimated_hours: num(fd, "estimated_hours"),
+    });
+  if (!p.success) flash("/tasks?new=1", "err", p.error.issues[0]?.message ?? "Check the team task.");
+  const deadline = p.data.deadline
+    ? zonedInstant(p.data.deadline.slice(0, 10), p.data.deadline.slice(11, 16) || "18:00", ctx.timezone).toISOString()
+    : null;
+  const sb = await supabaseServer();
+  const { data, error } = await sb.rpc("create_team_task", {
+    p_team: p.data.team_id,
+    p_mode: p.data.mode,
+    p_title: p.data.title,
+    p_description: p.data.description,
+    p_priority: p.data.priority,
+    p_deadline: deadline,
+    p_estimate: p.data.estimated_hours,
+    p_project: p.data.project_id,
+  });
+  if (error) flash("/tasks?new=1", "err", dbMessage(error));
+  revalidatePath("/tasks");
+  flash(
+    p.data.mode === "EACH" ? "/tasks?view=team" : "/tasks?view=open",
+    "ok",
+    p.data.mode === "EACH"
+      ? `Assigned to ${data} team member${data === 1 ? "" : "s"}. Each got a notification.`
+      : "Shared task posted to the team pool — everyone in the team was notified.",
+  );
+}
+
+export async function claimTask(fd: FormData) {
+  await requireContext();
+  const id = z.string().uuid().safeParse(fd.get("id"));
+  if (!id.success) flash("/tasks?view=open", "err", "Unknown task.");
+  const sb = await supabaseServer();
+  const { error } = await sb.rpc("claim_team_task", { p_task: id.data });
+  if (error) flash("/tasks?view=open", "err", dbMessage(error));
+  revalidatePath("/tasks");
+  flash(`/tasks?view=mine&focus=${id.data}`, "ok", "It's yours now — it's in My tasks.");
 }

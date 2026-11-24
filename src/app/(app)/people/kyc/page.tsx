@@ -5,6 +5,7 @@ import { Badge, Card, Empty, Flash, PageHeader, TableWrap } from "@/components/u
 import { fmtDate, fmtDateTime } from "@/lib/engines/time";
 import { DOC_LABELS } from "@/lib/kyc";
 import { remindKyc, reviewKyc, reviewKycDoc } from "../../kyc/actions";
+import { DecisionButtons } from "@/components/decision-buttons";
 
 export const metadata = { title: "KYC verification" };
 const ORDER = ["SUBMITTED", "CHANGES_REQUESTED", "DRAFT", "NOT_STARTED", "VERIFIED"];
@@ -81,12 +82,12 @@ export default async function KycQueue({ searchParams }: { searchParams: Promise
                 <input type="hidden" name="employee_id" value={sel} />
                 <textarea name="note" rows={2} maxLength={1000} className="input" placeholder="Note (required when asking for changes)" />
                 <div className="flex flex-wrap gap-2">
-                  <button name="decision" value="VERIFIED" className="btn-primary">
-                    Verify KYC
-                  </button>
-                  <button name="decision" value="CHANGES_REQUESTED" className="btn-ghost">
-                    Ask for changes
-                  </button>
+                  <DecisionButtons
+                    choices={[
+                      { value: "VERIFIED", label: "Verify KYC", className: "btn-primary" },
+                      { value: "CHANGES_REQUESTED", label: "Ask for changes", className: "btn-ghost" },
+                    ]}
+                  />
                 </div>
                 <p className="text-xs text-muted">
                   Verify each required document first. On verification, PAN and bank details are added to payroll where empty.
@@ -116,13 +117,13 @@ export default async function KycQueue({ searchParams }: { searchParams: Promise
                         <form action={reviewKycDoc} className="flex flex-wrap gap-1">
                           <input type="hidden" name="id" value={d.id} />
                           <input type="hidden" name="employee_id" value={sel} />
-                          <button name="decision" value="VERIFIED" className="btn-ghost text-xs">
-                            ✓ Verify
-                          </button>
                           <input name="note" placeholder="Reason if rejecting" className="input w-36 py-1 text-xs" maxLength={500} />
-                          <button name="decision" value="REJECTED" className="btn-ghost text-xs text-danger">
-                            Reject
-                          </button>
+                          <DecisionButtons
+                            choices={[
+                              { value: "VERIFIED", label: "✓ Verify", className: "btn-ghost text-xs" },
+                              { value: "REJECTED", label: "Reject", className: "btn-ghost text-xs text-danger" },
+                            ]}
+                          />
                         </form>
                       )}
                     </span>

@@ -4,7 +4,7 @@ import { requireContext, can, canAny } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
 import { Badge, Card, Empty, Field, Flash, PageHeader, TableWrap } from "@/components/ui";
 import { fmtDateTime } from "@/lib/engines/time";
-import { createProject, createTask, moveTask } from "./actions";
+import { claimTask, createProject, createTask, createTeamTask, moveTask } from "./actions";
 import clsx from "clsx";
 
 export const metadata = { title: "Tasks" };
@@ -27,18 +27,20 @@ export default async function Tasks({ searchParams }: { searchParams: Promise<Re
   const ctx = await requireContext();
   const sb = await supabaseServer();
   const team = canAny(ctx, ["tasks.view_all", "tasks.view_team"]);
-  const view = ["mine", "team", "overdue", "kanban"].includes(sp.view ?? "") ? sp.view! : "mine";
+  const view = ["mine", "team", "open", "overdue", "kanban"].includes(sp.view ?? "") ? sp.view! : "mine";
   const now = new Date().toISOString();
 
   let q = sb
     .from("tasks")
     .select(
-      "id, title, status, priority, deadline, quality_score, reopen_count, assignee_id, assigned_by, estimated_hours, actual_hours, assignee:employees!tasks_assignee_id_fkey(full_name), project:projects(name)",
+      "id, title, status, priority, deadline, quality_score, reopen_count, assignee_id, assigned_by, team_id, estimated_hours, actual_hours, assignee:employees!assignee_id(full_name), project:projects(name), team:org_teams(name)",
     )
     .order("deadline", { ascending: true, nullsFirst: false })
     .limit(300);
   if (view === "mine" || (view === "kanban" && !team)) q = q.eq("assignee_id", ctx.employee_id);
   if (view === "team") q = q.neq("assignee_id", ctx.employee_id);
+  // Team pool: shared team tasks nobody has claimed yet (RLS shows your teams' and the ones you assigned).
+  if (view === "open") q = q.is("assignee_id", null).not("team_id", "is", null).not("status", "in", "(COMPLETED,CANCELLED)");
   if (view === "overdue") q = q.lt("deadline", now).not("status", "in", "(COMPLETED,CANCELLED)");
   if (view !== "overdue" && sp.done !== "1") q = q.neq("status", "CANCELLED");
   const [{ data: tasks }, { data: dir }, { data: projects }, { data: clients }, { data: timeRows }] = await Promise.all([
@@ -49,6 +51,12 @@ export default async function Tasks({ searchParams }: { searchParams: Promise<Re
     sb.from("task_time_entries").select("task_id,minutes,status").eq("status", "APPROVED"),
   ]);
   const canAssignOthers = can(ctx, "tasks.manage");
+  // Teams I can give work to: every team for HR/admins/owners, otherwise the teams I lead or manage.
+  const { data: assignTeams } = canAssignOthers
+    ? canAny(ctx, ["tasks.view_all", "people.manage"])
+      ? await sb.from("org_teams").select("id, name").eq("is_active", true).order("name")
+      : await sb.rpc("my_manageable_teams")
+    : { data: [] as { id: string; name: string }[] };
   const back = `/tasks?view=${view}`;
 
   const Actions = ({ t }: { t: any }) =>
@@ -87,7 +95,13 @@ export default async function Tasks({ searchParams }: { searchParams: Promise<Re
         <Link className="btn-ghost" href="/quality">
           Quality register
         </Link>
-        {[["mine", "My tasks"], ...(team ? [["team", "Team tasks"]] : []), ["overdue", "Overdue"], ["kanban", "Kanban"]].map(([k, l]) => (
+        {[
+          ["mine", "My tasks"],
+          ...(team ? [["team", "Team tasks"]] : []),
+          ["open", "Team pool"],
+          ["overdue", "Overdue"],
+          ["kanban", "Kanban"],
+        ].map(([k, l]) => (
           <Link key={k} href={`/tasks?view=${k}`} className={view === k ? "btn-primary" : "btn-ghost"}>
             {l}
           </Link>
@@ -141,6 +155,58 @@ export default async function Tasks({ searchParams }: { searchParams: Promise<Re
             <button className="btn-primary">Create task</button>
           </div>
         </form>
+        {(assignTeams ?? []).length > 0 && (
+          <form action={createTeamTask} className="mt-6 grid gap-3 border-t border-line pt-4 sm:grid-cols-2 lg:grid-cols-4">
+            <p className="eyebrow sm:col-span-2 lg:col-span-4">Give work to a team</p>
+            <Field label="Title" className="sm:col-span-2">
+              <input name="title" required minLength={2} className="input" placeholder="e.g. Diwali reels — 3 per client" />
+            </Field>
+            <Field label="Team">
+              <select name="team_id" className="input" required>
+                {(assignTeams ?? []).map((t: { id: string; name: string }) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="How">
+              <select name="mode" className="input" defaultValue="EACH">
+                <option value="EACH">A copy for each member</option>
+                <option value="SHARED">One shared task — first to claim it</option>
+              </select>
+            </Field>
+            <Field label="Project">
+              <select name="project_id" className="input">
+                <option value="">—</option>
+                {(projects ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Priority">
+              <select name="priority" className="input" defaultValue="MEDIUM">
+                {["LOW", "MEDIUM", "HIGH", "URGENT"].map((p) => (
+                  <option key={p}>{p}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Deadline (IST)">
+              <input type="datetime-local" name="deadline" className="input" />
+            </Field>
+            <Field label="Estimate (hours each)">
+              <input type="number" name="estimated_hours" min="0" step="0.25" className="input" />
+            </Field>
+            <Field label="Description" className="sm:col-span-2 lg:col-span-4">
+              <textarea name="description" rows={2} className="input" />
+            </Field>
+            <div>
+              <button className="btn-primary">Assign to team</button>
+            </div>
+          </form>
+        )}
         {can(ctx, "projects.manage") && (
           <form action={createProject} className="mt-6 flex flex-wrap items-end gap-2 border-t border-line pt-4">
             <Field label="New project">
@@ -165,7 +231,12 @@ export default async function Tasks({ searchParams }: { searchParams: Promise<Re
       </details>
 
       {!tasks?.length ? (
-        <Empty title={view === "overdue" ? "Nothing overdue" : "No tasks"} hint="Tasks assigned to you appear here." />
+        <Empty
+          title={view === "overdue" ? "Nothing overdue" : view === "open" ? "No open team tasks" : "No tasks"}
+          hint={
+            view === "open" ? "Shared tasks for your teams appear here until someone claims them." : "Tasks assigned to you appear here."
+          }
+        />
       ) : view === "kanban" ? (
         <div className="-mx-4 overflow-x-auto px-4">
           <div className="grid min-w-[1100px] grid-cols-6 gap-3">
@@ -230,7 +301,16 @@ export default async function Tasks({ searchParams }: { searchParams: Promise<Re
                         {t.reopen_count ? ` · reworked ×${t.reopen_count}` : ""}
                       </p>
                     </td>
-                    <td className="text-muted">{t.assignee?.full_name ?? "—"}</td>
+                    <td className="text-muted">
+                      {t.assignee?.full_name ?? (t.team ? `${t.team.name} · unclaimed` : "—")}
+                      {t.assignee && t.team && <span className="block text-[11px]">{t.team.name}</span>}
+                      {!t.assignee_id && t.team_id && (
+                        <form action={claimTask} className="mt-1">
+                          <input type="hidden" name="id" value={t.id} />
+                          <button className="btn-ghost px-2 py-1 text-xs">Claim</button>
+                        </form>
+                      )}
+                    </td>
                     <td>
                       <Badge>{overdue(t) ? "OVERDUE" : t.status}</Badge>
                     </td>

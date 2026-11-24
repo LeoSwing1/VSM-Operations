@@ -99,6 +99,17 @@ export function EmployeeFields({
           className="input"
         />
       </Field>
+      <Field label="Salary day (of every month)">
+        <input
+          name="salary_day"
+          type="number"
+          min={1}
+          max={31}
+          defaultValue={e?.salary_day ?? ""}
+          className="input"
+          placeholder="Auto: joining date + 7 days"
+        />
+      </Field>
       <Field label="Phone">
         <input name="phone" defaultValue={e?.phone ?? ""} className="input" />
       </Field>

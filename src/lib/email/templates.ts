@@ -70,6 +70,19 @@ export const templates: Record<string, (p: P) => Rendered> = {
     ),
     text: `Hi ${p.name}, your report "${p.report}" for ${p.period} is ready. Sign in to download: ${app()}/api/reports/runs/${p.run_id}`,
   }),
+  "chat.unread_reminder": (p) => {
+    const chats = (Array.isArray(p.chats) ? p.chats : []) as { name?: string; count?: number }[];
+    const list = chats.map((c) => `${esc(c.name ?? "Chat")} — ${Number(c.count ?? 0)} new`).join("<br>");
+    return {
+      subject: `You have ${p.total} unread message${Number(p.total) === 1 ? "" : "s"} on VSM Ops`,
+      html: layout(
+        `${p.total} unread message${Number(p.total) === 1 ? "" : "s"}`,
+        `Hi ${esc(p.name)}, these chats have messages waiting for you for over 2 hours:<br><br>${list}`,
+        { label: "Open chats", href: `${app()}/chat` },
+      ),
+      text: `Hi ${p.name}, you have ${p.total} unread messages waiting for over 2 hours:\n${chats.map((c) => `- ${c.name}: ${c.count} new`).join("\n")}\nOpen: ${app()}/chat`,
+    };
+  },
   "digest.daily": (p) => {
     const items = (Array.isArray(p.items) ? p.items : []) as { template: string; payload: P; category: string }[];
     const rows = items.map((i) => ({ category: i.category, subject: templates[i.template]?.(i.payload ?? {}).subject ?? i.template }));

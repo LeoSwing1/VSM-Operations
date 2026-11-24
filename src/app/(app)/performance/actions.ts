@@ -2,7 +2,7 @@
 import { z } from "zod";
 import { requireContext, requirePerm } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
-import { dbMessage, flash, num, optStr, str } from "@/lib/actions";
+import { dbMessage, flash, num, optStr, str, decisionOf } from "@/lib/actions";
 import { computeForEmployee } from "@/lib/data/performance";
 import { METRIC_KEYS, validateWeights, type Weights } from "@/lib/engines/performance";
 
@@ -142,7 +142,7 @@ export async function requestReview(fd: FormData) {
 export async function respondReviewRequest(fd: FormData) {
   const ctx = await requirePerm("performance.review", "performance.view_all");
   const sb = await supabaseServer();
-  const status = str(fd, "decision") === "approve" ? "APPROVED" : "REJECTED";
+  const status = decisionOf(fd, "/performance") ? "APPROVED" : "REJECTED";
   const { error } = await sb
     .from("performance_review_requests")
     .update({ status, response: optStr(fd, "response"), responded_by: ctx.employee_id })

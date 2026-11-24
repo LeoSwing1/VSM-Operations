@@ -5,6 +5,7 @@ import { Card, Empty, Flash, PageHeader } from "@/components/ui";
 import { fmtDate, fmtDateTime } from "@/lib/engines/time";
 import { decide, decideWorkflowApproval } from "./actions";
 import { reviewTask } from "../tasks/actions";
+import { DecisionButtons } from "@/components/decision-buttons";
 
 export const metadata = { title: "Approvals" };
 
@@ -55,12 +56,7 @@ export default async function Approvals({ searchParams }: { searchParams: Promis
         className="input min-w-[180px] flex-1"
         placeholder={requireNote ? "Comment (required to reject)" : "Comment (optional)"}
       />
-      <button name="decision" value="approve" className="btn-primary">
-        Approve
-      </button>
-      <button name="decision" value="reject" className="btn-danger">
-        Reject
-      </button>
+      <DecisionButtons />
     </form>
   );
 
@@ -83,12 +79,7 @@ export default async function Approvals({ searchParams }: { searchParams: Promis
             <form action={decideWorkflowApproval} className="mt-3 flex flex-wrap gap-2">
               <input type="hidden" name="id" value={a.id} />
               <input name="note" className="input min-w-[180px] flex-1" placeholder="Decision note" />
-              <button name="decision" value="approve" className="btn-primary">
-                Approve
-              </button>
-              <button name="decision" value="reject" className="btn-danger">
-                Reject
-              </button>
+              <DecisionButtons />
             </form>
           </Card>
         ))}
@@ -140,12 +131,12 @@ export default async function Approvals({ searchParams }: { searchParams: Promis
                 <input name="quality" type="number" min="0" max="100" className="input" />
               </label>
               <input name="note" className="input min-w-[160px] flex-1" placeholder="Feedback for the employee" />
-              <button name="decision" value="approve" className="btn-primary">
-                Approve
-              </button>
-              <button name="decision" value="reject" className="btn-danger">
-                Send back
-              </button>
+              <DecisionButtons
+                choices={[
+                  { value: "approve", label: "Approve", className: "btn-primary" },
+                  { value: "reject", label: "Send back", className: "btn-danger" },
+                ]}
+              />
             </form>
           </Card>
         ))}

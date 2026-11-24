@@ -5,6 +5,7 @@ import { fyQuarter, krProgress, kpiStatus, objectiveProgress, shiftQuarter, sugg
 import { reportFile, reportRows } from "@/lib/reports/build";
 import { makeXlsxSheets } from "@/lib/reports/workbook";
 import { trimHistory, toolSpecs } from "@/lib/ai/spec";
+import { defaultSalaryDay, nextSalaryDate, ordinal } from "@/lib/engines/salary-day";
 
 describe("OKR helpers", () => {
   it("uses Indian financial-year quarters", () => {
@@ -99,5 +100,21 @@ describe("AI assistant", () => {
     );
     expect(h.length).toBeLessThanOrEqual(12);
     expect(h[0]!.role).toBe("user");
+  });
+});
+
+describe("salary day", () => {
+  it("defaults to joining date + 7 days", () => {
+    expect(defaultSalaryDay("2027-01-01")).toBe(8);
+    expect(defaultSalaryDay("2026-11-28")).toBe(5); // rolls into next month → the 5th
+    expect(defaultSalaryDay("2026-11-16")).toBe(23);
+  });
+  it("finds the next pay date, clamped to short months", () => {
+    expect(nextSalaryDate(8, "2026-11-24")).toBe("2026-12-08");
+    expect(nextSalaryDate(8, "2026-11-08")).toBe("2026-11-08");
+    expect(nextSalaryDate(31, "2027-02-10")).toBe("2027-02-28");
+    expect(nextSalaryDate(31, "2026-12-31")).toBe("2026-12-31");
+    expect(nextSalaryDate(5, "2026-12-20")).toBe("2027-01-05");
+    expect(ordinal(1) + ordinal(2) + ordinal(3) + ordinal(11) + ordinal(22)).toBe("1st2nd3rd11th22nd");
   });
 });

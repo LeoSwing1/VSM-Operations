@@ -6,6 +6,7 @@ import { loadAttendance, minutesToHm } from "@/lib/data/attendance";
 import { computeForEmployee } from "@/lib/data/performance";
 import { Badge, Card, Empty, Flash, Meter, PageHeader, Stat, TableWrap, Tabs, inr } from "@/components/ui";
 import { fmtDate, fmtDateTime, localDate, monthBounds } from "@/lib/engines/time";
+import { nextSalaryDate, ordinal } from "@/lib/engines/salary-day";
 import { EmployeeFields } from "../employee-form";
 import { LoginPanel } from "../login-panel";
 import { copyDocumentToDrive } from "../../settings/integrations/google-actions";
@@ -167,6 +168,12 @@ function Overview({ e, manage, canReset, self, teams }: { e: any; manage: boolea
       ),
     ],
     ["Joining date", fmtDate(e.joining_date)],
+    [
+      "Salary day",
+      e.salary_day
+        ? `${ordinal(e.salary_day)} of every month · next ${fmtDate(nextSalaryDate(e.salary_day, localDate(new Date(), "Asia/Kolkata")))}`
+        : "—",
+    ],
     ["Employment", `${e.employment_type.replace("_", " ")}`],
     ["Work location", e.work_location ?? "—"],
     ["Shift", e.shift ? `${e.shift.name} (${e.shift.start_time.slice(0, 5)}–${e.shift.end_time.slice(0, 5)})` : "—"],
