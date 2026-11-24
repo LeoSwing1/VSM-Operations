@@ -18,11 +18,19 @@ export const PERMISSION_GROUPS: { group: string; perms: [string, string][] }[] =
       ["people.view_team", "View reporting team"],
       ["people.manage", "Create & edit employees"],
       ["people.onboard", "Add executives, employees and interns (HR post)"],
+      ["people.salary_day", "Set and change salary dates (HR, HR Manager, owners, admins)"],
       ["people.add_team", "Add executives and interns to their own team (managers)"],
       ["kyc.verify", "See and verify KYC documents"],
       ["people.reset_password", "Reset employee passwords"],
       ["recruit.view", "View recruitment pipeline"],
       ["recruit.manage", "Manage candidates & interviews"],
+    ],
+  },
+  {
+    group: "Assets & inventory",
+    perms: [
+      ["assets.view", "View the asset register"],
+      ["assets.manage", "Add, issue, take back and repair assets"],
     ],
   },
   {

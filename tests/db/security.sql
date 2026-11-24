@@ -1189,7 +1189,19 @@ insert into employees(org_id, full_name, official_email, role, manager_id, joini
 reset role;
 select t_ok((select salary_day from employees where official_email = 'mgrpick@vsm.test') = 8, 'only HR/payroll choose a custom salary day; managers get the default');
 update employees set joining_date = '2027-03-10' where official_email = 'autoday@vsm.test';
-select t_ok((select salary_day from employees where official_email = 'autoday@vsm.test') = 17, 'a default salary day follows a corrected joining date');
+select t_ok((select salary_day from employees where official_email = 'autoday@vsm.test') = 8, 'the saved salary date stays fixed when the joining date is corrected');
+select id as e_pay from employees where official_email = 'payday@vsm.test' \gset
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select t_denied(format($$update employees set salary_day = 20 where id = %L$$, :'e_pay'), 'managers cannot change a salary date');
+reset role;
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+update employees set salary_day = 20 where id = :'e_pay';
+reset role;
+select t_ok((select salary_day from employees where id = :'e_pay') = 20, 'the HR Manager can change a salary date');
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+update employees set salary_day = 21 where id = :'e_pay';
+reset role;
+select t_ok((select salary_day from employees where id = :'e_pay') = 21, 'the Super Admin can change a salary date');
 
 -- Team tasks
 insert into org_teams(org_id, name, lead_employee_id, created_by) values (:'org', 'SEO Test Squad', :'e_m', :'e_s') returning id as seo \gset
@@ -1235,6 +1247,70 @@ insert into chat_messages(org_id, channel_id, author_id, body, created_at)
   select :'org', c.id, :'e_m', 'Hello SEO', now() - interval '3 hours' from chat_channels c where c.channel_type <> 'DIRECT' and exists (select 1 from chat_channel_members x where x.channel_id = c.id and x.employee_id = :'e_a') limit 1;
 select chat_send_unread_reminders(2);
 select t_ok(not exists (select 1 from email_outbox where template = 'chat.unread_reminder' and recipient_employee_id = :'e_a'), 'people who muted chat emails get no reminder');
+
+-- 0041: assets & inventory
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_denied(format($$insert into assets(org_id, name, category) values (%L, 'MacBook Air', 'LAPTOP')$$, :'org'), 'employees cannot add assets');
+reset role;
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+insert into assets(org_id, name, category, brand, serial_no) values (:'org', 'MacBook Air M3', 'LAPTOP', 'Apple', 'C02XYZ1') returning id as lap, asset_tag as lap_tag \gset
+insert into assets(org_id, name, category, identifier) values (:'org', 'Jio SIM', 'SIM', '9876500099') returning id as sim \gset
+insert into asset_financials(asset_id, org_id, purchase_date, purchase_cost, vendor) values (:'lap', :'org', '2026-10-01', 114900, 'Croma');
+select t_ok(:'lap_tag' ~ '^AST-\d{4}$', 'new assets get an automatic AST-0001 style tag');
+select t_denied(format($$insert into assets(org_id, name, category, serial_no) values (%L, 'Clone', 'LAPTOP', 'c02xyz1')$$, :'org'), 'the same serial number cannot be registered twice');
+select t_denied(format($$update assets set current_holder_id = %L, status = 'ISSUED' where id = %L$$, :'e_a', :'lap'), 'the holder cannot be set by editing — use Issue');
+select asset_issue(:'lap', :'e_a', 'NEW', null, 'For client edits');
+select t_denied(format($$select asset_issue(%L, %L)$$, :'lap', :'e_b'), 'an issued asset cannot be issued again');
+select asset_issue(:'sim', :'e_a');
+reset role;
+select t_ok((select status = 'ISSUED' and current_holder_id = :'e_a' from assets where id = :'lap'), 'issuing marks the asset ISSUED to that person');
+select t_ok(exists (select 1 from notifications where recipient_id = :'e_a' and link = '/my-assets'), 'the employee is notified to confirm receipt');
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok((select count(*) from my_assets()) = 2, 'employees see the kit they hold');
+select t_none('select count(*) from asset_financials', 'employees never see purchase cost');
+select t_denied(format($$select asset_return(%L, 'GOOD')$$, :'lap'), 'employees cannot check kit back in themselves');
+select asset_acknowledge((select assignment_id from my_assets() where asset_id = :'lap'));
+select t_ok((select acknowledged_at is not null from my_assets() where asset_id = :'lap'), 'the holder confirms receipt');
+select asset_report_issue(:'lap', 'Battery drains in 2 hours');
+select t_denied(format($$delete from assets where id = %L$$, :'lap'), 'assets cannot be deleted');
+reset role;
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((select count(*) from assets where id = :'lap') = 0, 'colleagues cannot see kit issued to someone else');
+select t_denied(format($$select asset_report_issue(%L, 'not mine')$$, :'lap'), 'only the holder can report a problem with it');
+select t_denied(format($$select asset_acknowledge((select id from asset_assignments where asset_id = %L limit 1))$$, :'lap'), 'only the holder can confirm receipt');
+reset role;
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select t_ok((select count(*) from assets where current_holder_id = :'e_a') = 2, 'managers see the kit their team holds');
+reset role;
+select t_ok(exists (select 1 from notifications where recipient_id = :'e_h' and dedupe_key like 'asset.issue_report:%'), 'asset managers are told about reported problems');
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_denied(format($$select asset_return(%L, 'DAMAGED', '')$$, :'lap'), 'a damaged return needs a note');
+select asset_return(:'lap', 'DAMAGED', 'Cracked hinge');
+reset role;
+select t_ok((select status = 'IN_REPAIR' and current_holder_id is null from assets where id = :'lap'), 'a damaged return goes to repair');
+select t_ok((select count(*) from asset_maintenance where asset_id = :'lap' and status = 'OPEN') = 2, 'a repair ticket is opened automatically');
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select asset_maintenance_update(id, 'DONE', 'Hinge replaced', 4500, 'Apple service') from asset_maintenance where asset_id = :'lap' and status = 'OPEN';
+reset role;
+select t_ok((select status = 'IN_STOCK' and condition = 'GOOD' from assets where id = :'lap'), 'closing every repair ticket returns the asset to stock');
+
+-- Exit: kit must come back
+insert into employees(org_id, full_name, official_email, role, joining_date) values (:'org', 'Kit Exit', 'kitexit@vsm.test', 'EMPLOYEE', '2026-01-01') returning id as e_kx \gset
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select asset_issue(:'lap', :'e_kx');
+reset role;
+update employees set status = 'NOTICE' where id = :'e_kx';
+select t_ok((select count(*) from exit_clearance_items where employee_id = :'e_kx' and asset_id = :'lap' and category = 'IT') = 1, 'notice period adds an IT clearance item for each asset held');
+select t_denied(format($$update employees set status = 'EXITED' where id = %L$$, :'e_kx'), 'nobody can be marked exited while holding company kit');
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select asset_return(:'lap', 'GOOD');
+reset role;
+select t_ok((select completed_at is not null from exit_clearance_items where employee_id = :'e_kx' and asset_id = :'lap'), 'returning the asset ticks its clearance item');
+update employees set status = 'EXITED' where id = :'e_kx';
+select t_ok((select status = 'EXITED' from employees where id = :'e_kx'), 'once kit is back the exit goes through');
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_denied(format($$select asset_issue(%L, %L)$$, :'lap', :'e_kx'), 'kit cannot be issued to someone who has left');
+reset role;
 
 -- Smoke: every public table is readable (subject to RLS) by every persona without policy errors.
 create or replace function t_sweep(label text) returns void language plpgsql as $$

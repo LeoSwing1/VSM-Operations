@@ -40,7 +40,7 @@ function read(fd: FormData) {
     phone: optStr(fd, "phone"),
     shift_id: optStr(fd, "shift_id"),
     work_location: optStr(fd, "work_location"),
-    // Blank = automatic (joining date + 7 days), set by the database.
+    // Filled in by the form (joining + 7, editable by HR). Blank = the database default.
     salary_day: str(fd, "salary_day") ? Number(str(fd, "salary_day")) : null,
   });
 }
@@ -112,9 +112,17 @@ export async function updateEmployee(fd: FormData) {
   if (!p.success) flash(`/people/${id}?tab=edit`, "err", p.error.issues[0]?.message ?? "Check the form.");
   const status = z.enum(["ACTIVE", "PROBATION", "NOTICE", "ON_LEAVE", "EXITED"]).parse(str(fd, "status") || "ACTIVE");
   const sb = await supabaseServer();
+  // Only HR / HR Manager / owners / admins may change the salary date; for anyone else it is left as saved.
+  const { salary_day, ...rest } = p.data;
   const { error } = await sb
     .from("employees")
-    .update({ ...p.data, employee_code: p.data.employee_code || undefined, status, exit_date: optStr(fd, "exit_date") })
+    .update({
+      ...rest,
+      ...(can(ctx, "people.salary_day") && salary_day != null ? { salary_day } : {}),
+      employee_code: p.data.employee_code || undefined,
+      status,
+      exit_date: optStr(fd, "exit_date"),
+    })
     .eq("id", id)
     .eq("org_id", ctx.org_id);
   if (error) flash(`/people/${id}?tab=edit`, "err", dbMessage(error));

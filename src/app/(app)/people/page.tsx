@@ -95,6 +95,7 @@ export default async function People({ searchParams }: { searchParams: Promise<R
               assignable={assignable}
               posts={(posts ?? []).map((x) => x.title)}
               nextCode={typeof nextCode === "string" ? `Auto: ${nextCode}` : undefined}
+              canSetSalary={can(ctx, "people.salary_day")}
             />
             {(myTeams ?? []).length > 0 && (
               <Field label="Add to team (optional)">

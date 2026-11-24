@@ -1,8 +1,8 @@
 # VSM Growth Operations — what's done and what's due
-_Updated 24 Nov 2026, after Blocks 25–27 and the people/KYC update (Block 24 client portal dropped)._
+_Updated 24 Nov 2026, after Blocks 29–30 (Block 24 client portal dropped)._
 
 ## Live database checklist
-- [ ] Run `supabase/repair/catch_up.sql` in the SQL Editor. It applies all missing migrations through 0035 and the table access grants in one transaction.
+- [ ] Run `supabase/repair/catch_up.sql` in the SQL Editor. It applies all missing migrations through 0042 and the table access grants in one transaction.
 - [ ] Run `supabase/diagnostics/health_check.sql` and confirm there are no `MISSING` or `ERROR` lines.
 - [ ] **Backups:** the project is on the Supabase **Free** plan, which shows "No backups". Upgrade to Pro (daily backups + optional PITR) before real payroll data, or schedule a nightly `pg_dump`.
 - [ ] Compute is **Nano** with RAM at about 60% and 24/60 connections. Move to Micro or Small before onboarding the whole team.
@@ -35,6 +35,8 @@ _Updated 24 Nov 2026, after Blocks 25–27 and the people/KYC update (Block 24 c
 - **AI assistant (26):** permission-aware "Ask Ops" chat, daily-update summaries, Hinglish client report/email/WhatsApp drafts; budget and daily caps; no payroll access; chats not stored.
 - **Reports & BI (27):** 6 reports (attendance, task delivery, CRM funnel, management P&L, Scholars admissions, KPI summary) on demand or scheduled in IST; link-only emails; monthly accountant pack.
 - **People & KYC (28):** profile fix, 2 owners, HR/manager onboarding rights, no deletes for employees, owners/admins in every group, KYC form + documents + HR verification, instant chat with clickable names.
+- **Chat reminders, team tasks, salary day (29):** 2-hour unread-chat emails, team work (each member / shared pool with claim), per-person salary date, approval-button fix.
+- **Assets & inventory (30):** register, issue/return with receipt confirmation, repairs, purchase value (managers only), exit returns enforced. Salary date fixed per person, editable only by HR/HR Manager/owners/admins.
 - **Tooling:** local Docker stack, health check, catch-up repair, 414 DB security checks in two grant modes, 164 unit tests, 16 e2e tests.
 
 ## Due blocks (proposed — tell me which to build next)
@@ -43,7 +45,6 @@ _Updated 24 Nov 2026, after Blocks 25–27 and the people/KYC update (Block 24 c
 | **29 · Scholars website link-up** | vsmscholars.com enquiry form → counselling pipeline, affiliate dashboard and payouts (with confirmation). | Website access; affiliate commission rules |
 | **30 · Payroll extras** | Bank-specific transfer files, old-regime declarations (80C/HRA proofs), Form 16 Part B helper. | Sample bank file; CA sign-off |
 | **31 · Native mobile app** | Installable Android/iOS app with FCM/APNs push for punches, approvals and chat. | Play/App Store accounts |
-| **32 · Assets & inventory** | Laptops, cameras, SIMs issued to people; returns at exit; maintenance. | Asset list |
 
 _Block 24 (client portal) was dropped on 23 Nov 2026 at the owner's request._
 

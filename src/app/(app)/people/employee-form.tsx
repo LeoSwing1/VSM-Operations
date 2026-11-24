@@ -1,5 +1,6 @@
 import { ROLE_LABEL, type Role } from "@/lib/auth";
 import { Field } from "@/components/ui";
+import { JoiningSalaryFields } from "./joining-salary-fields";
 
 export interface Option {
   id: string;
@@ -13,6 +14,7 @@ export function EmployeeFields({
   assignable,
   posts = [],
   nextCode,
+  canSetSalary = false,
 }: {
   e?: Record<string, any>;
   departments: Option[];
@@ -21,6 +23,7 @@ export function EmployeeFields({
   assignable: { role: Role; label: string }[];
   posts?: string[];
   nextCode?: string;
+  canSetSalary?: boolean;
 }) {
   // Only roles below the editor's level are offered; the current role stays selectable so a save doesn't change it.
   const roles =
@@ -90,26 +93,7 @@ export function EmployeeFields({
           ))}
         </select>
       </Field>
-      <Field label="Joining date">
-        <input
-          name="joining_date"
-          type="date"
-          defaultValue={e?.joining_date ?? new Date().toISOString().slice(0, 10)}
-          required
-          className="input"
-        />
-      </Field>
-      <Field label="Salary day (of every month)">
-        <input
-          name="salary_day"
-          type="number"
-          min={1}
-          max={31}
-          defaultValue={e?.salary_day ?? ""}
-          className="input"
-          placeholder="Auto: joining date + 7 days"
-        />
-      </Field>
+      <JoiningSalaryFields joining={e?.joining_date} salaryDay={e?.salary_day} canEdit={canSetSalary} />
       <Field label="Phone">
         <input name="phone" defaultValue={e?.phone ?? ""} className="input" />
       </Field>

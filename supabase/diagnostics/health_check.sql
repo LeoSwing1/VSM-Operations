@@ -17,7 +17,7 @@ begin
       ('0028 field attendance', 'public.office_locations'), ('0029 India payroll', 'public.payroll_statutory_settings'),
       ('0030 Google Workspace', 'public.google_workspace_settings'), ('0031 VSM Scholars', 'public.scholar_students'),
       ('0032 OKRs & KPIs', 'public.okr_objectives'), ('0033 AI assistant', 'public.ai_settings'), ('0034 reports', 'public.report_schedules'),
-      ('0035 owners & KYC', 'public.kyc_profiles'), ('0040 chat reminders, team tasks & salary day', 'public.chat_unread_reminders')) as t(label, obj) loop
+      ('0035 owners & KYC', 'public.kyc_profiles'), ('0040 chat reminders, team tasks & salary day', 'public.chat_unread_reminders'), ('0041 assets & inventory', 'public.assets')) as t(label, obj) loop
     area := 'migrations'; check_name := r.label; result := case when to_regclass(r.obj) is null then 'MISSING ✗' else 'ok' end; return next;
   end loop;
   area := 'migrations'; check_name := '0022 repair';

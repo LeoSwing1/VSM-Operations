@@ -40,6 +40,7 @@ const TABS = [
   { key: "performance", label: "Performance" },
   { key: "salary", label: "Salary" },
   { key: "kyc", label: "KYC" },
+  { key: "assets", label: "Assets" },
   { key: "activity", label: "Activity" },
 ];
 
@@ -119,8 +120,11 @@ export default async function Employee360({
       {tab === "performance" && <PerformanceTab sb={sb} id={id} start={start} end={end} tz={tz} />}
       {tab === "salary" && salaryAllowed && <SalaryTab sb={sb} id={id} />}
       {tab === "kyc" && (self || can(ctx, "kyc.verify")) && <KycTab sb={sb} id={id} self={self} />}
+      {tab === "assets" && <AssetsTab sb={sb} id={id} tz={tz} />}
       {tab === "activity" && <ActivityTab sb={sb} id={id} tz={tz} />}
-      {tab === "edit" && manage && <EditTab sb={sb} e={e} assignable={await assignableRoles(sb, ctx)} />}
+      {tab === "edit" && manage && (
+        <EditTab sb={sb} e={e} assignable={await assignableRoles(sb, ctx)} canSalary={can(ctx, "people.salary_day")} />
+      )}
     </>
   );
 }
@@ -847,7 +851,17 @@ async function ActivityTab({ sb, id, tz }: { sb: SB; id: string; tz: string }) {
   );
 }
 
-async function EditTab({ sb, e, assignable }: { sb: SB; e: any; assignable: { role: Role; label: string }[] }) {
+async function EditTab({
+  sb,
+  e,
+  assignable,
+  canSalary,
+}: {
+  sb: SB;
+  e: any;
+  assignable: { role: Role; label: string }[];
+  canSalary: boolean;
+}) {
   const [{ data: depts }, { data: shifts }, { data: dir }, { data: posts }] = await Promise.all([
     sb.from("departments").select("id, name").order("name"),
     sb.from("shifts").select("id, name"),
@@ -865,6 +879,7 @@ async function EditTab({ sb, e, assignable }: { sb: SB; e: any; assignable: { ro
           shifts={(shifts ?? []) as any}
           assignable={assignable}
           posts={(posts ?? []).map((x) => x.title)}
+          canSetSalary={canSalary}
         />
         <div className="grid gap-3 sm:grid-cols-3">
           <label className="block">
@@ -947,6 +962,63 @@ function ProfileCard({ card, self }: { card: CardData; self: boolean }) {
         </dl>
       </Card>
     </>
+  );
+}
+
+async function AssetsTab({ sb, id, tz }: { sb: SB; id: string; tz: string }) {
+  const [{ data: held }, { data: past }] = await Promise.all([
+    sb.rpc("my_assets", { p_employee: id }),
+    sb
+      .from("asset_assignments")
+      .select("id, issued_at, returned_at, condition_in, asset:assets!asset_id(id, asset_tag, name)")
+      .eq("employee_id", id)
+      .not("returned_at", "is", null)
+      .order("returned_at", { ascending: false })
+      .limit(30),
+  ]);
+  const list = (held ?? []) as any[];
+  return (
+    <div className="grid gap-6 lg:grid-cols-2">
+      <Card title={`Holding now (${list.length})`} hint="Everything here must come back before exit.">
+        {!list.length ? (
+          <Empty title="No company kit" />
+        ) : (
+          <ul className="space-y-2 text-sm">
+            {list.map((i) => (
+              <li key={i.assignment_id}>
+                <Link href={`/assets/${i.asset_id}`} className="font-medium underline">
+                  {i.asset_tag} · {i.name}
+                </Link>
+                <span className="text-xs text-muted">
+                  {" "}
+                  since {fmtDateTime(i.issued_at, tz)} · {i.acknowledged_at ? "receipt confirmed" : "not confirmed yet"}
+                  {i.open_issues ? ` · ${i.open_issues} open issue(s)` : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+      <Card title="Returned">
+        {!past?.length ? (
+          <Empty title="Nothing returned yet" />
+        ) : (
+          <ul className="space-y-2 text-sm">
+            {past.map((h: any) => (
+              <li key={h.id}>
+                <Link href={`/assets/${h.asset?.id}`} className="underline">
+                  {h.asset?.asset_tag} · {h.asset?.name}
+                </Link>
+                <span className="text-xs text-muted">
+                  {" "}
+                  · back {fmtDateTime(h.returned_at, tz)} · {String(h.condition_in).toLowerCase()}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+    </div>
   );
 }
 
