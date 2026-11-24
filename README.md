@@ -385,3 +385,6 @@ Block 15 wires leave, timesheet and quality business events; adds scheduled task
 
 ## Blocks 19–23
 Hardening (error log, rate limits, CI, Playwright), field attendance (geofence, selfie, offline), Indian payroll (PF/ESI/PT/TDS, payslip PDF, bank file, Form 16 data, RazorpayX confirmation), Google Workspace (two-way Calendar, Drive, Gmail) and VSM Scholars (pipeline, batches, fees, receipts, QR-verified certificates). See `docs/blocks/BLOCKS-19-23.md`.
+
+## Blocks 25–27
+OKRs, KPIs per post (auto from tasks/attendance/CRM/Scholars), 360° reviews and training (`/growth`); a permission-aware Claude assistant (`/assistant`); and on-demand + scheduled reports with an accountant pack (`/reports`). See `docs/blocks/BLOCKS-25-27.md`.

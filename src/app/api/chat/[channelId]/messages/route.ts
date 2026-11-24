@@ -36,7 +36,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ cha
         ? sb.from("chat_reactions").select("message_id,reaction,employee_id").in("message_id", ids)
         : Promise.resolve({ data: [] }),
       sb.from("employee_directory").select("id,full_name,photo_url"),
-      sb.from("chat_channel_members").select("employee_id,last_read_at").eq("channel_id", channelId),
+      sb.from("chat_channel_members").select("employee_id,last_read_at,last_delivered_at").eq("channel_id", channelId),
     ]);
     const attachmentRows = (attachments ?? []) as {
       id: string;
@@ -50,7 +50,12 @@ export async function GET(_request: Request, { params }: { params: Promise<{ cha
     const memberRows = (directory ?? []) as { id: string; full_name: string }[];
     const enriched = await Promise.all(
       attachmentRows.map(async (a) => {
-        const { data } = await sb.storage.from("chat-files").createSignedUrl(a.storage_path, 300);
+        // Images, video, audio and PDF open in place (original quality). Everything else downloads, so an HTML/SVG
+        // file can never run as a web page.
+        const inline = /^(image\/(jpeg|png|webp|gif|avif|bmp)|video\/(mp4|webm|quicktime|ogg)|audio\/|application\/pdf$)/.test(a.mime_type);
+        const { data } = await sb.storage
+          .from("chat-files")
+          .createSignedUrl(a.storage_path, 3600, inline ? undefined : { download: a.file_name });
         return { ...a, url: data?.signedUrl ?? null };
       }),
     );
@@ -60,7 +65,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ cha
       reactions: reactionRows.filter((r) => r.message_id === m.id),
       author_name: memberRows.find((e) => e.id === m.author_id)?.full_name ?? "Team member",
     }));
-    const readRows = (channelMembers ?? []) as { employee_id: string; last_read_at: string | null }[];
+    const readRows = (channelMembers ?? []) as { employee_id: string; last_read_at: string | null; last_delivered_at: string | null }[];
     const channelRoster = readRows.map((m) => ({
       ...m,
       full_name: memberRows.find((e) => e.id === m.employee_id)?.full_name ?? "Team member",

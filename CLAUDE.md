@@ -131,3 +131,16 @@ Workflow rules are tenant-scoped and cannot execute arbitrary code. Events are i
 - Scholars fees: insert DUE rows only; PAID/WAIVED only through `scholar_confirm_payment` / `scholar_waive_payment`. Certificates only through `scholar_issue_certificate`.
 - Post-based grants (`designations.grants`) must never include sensitive permissions (the DB ignores them anyway).
 - Server errors are captured by `src/instrumentation.ts`; never log request bodies or secrets (use `scrub`).
+
+## Blocks 25–27 rules
+- OKR/KPI maths: keep `src/lib/engines/growth.ts` and `okr_kr_progress()` / `okr_objective_progress()` in sync. AUTO KPI values only come from `kpi_refresh()`; never write them from the app.
+- 360°: subjects never read `review_assignments`; only `review_summary()` (anonymity threshold 2). Don't add policies that expose peer rows.
+- AI: tools in `src/lib/ai/tools.ts` must use the user's `supabaseServer()` client — never `supabaseAdmin()`. Never add payroll/salary/bank/statutory tools. Don't store prompts or answers. Key is `ANTHROPIC_API_KEY` (server only).
+- Reports: every report type needs an entry in `report_type_perm()` AND `REPORT_TYPES`. Report data is aggregates only — no per-person salary. Emails carry links, never figures. `employee_has_perm()` must mirror `has_perm()`.
+
+## People, owners & KYC rules (0035)
+- Embeds from employees to departments MUST name the FK: `departments!employees_department_id_fkey(...)` (departments.head_employee_id makes it ambiguous).
+- Owners: `employees.is_owner` (max 2 incl. Super Admin; only SA sets it). has_perm/employee_has_perm/my_context treat owners like SA — keep all three in sync.
+- Adding employees: `can_add_employee()` (people.manage / people.onboard / people.add_team with manager = self). Never grant DELETE on employees.
+- KYC: never store full Aadhaar (last 4 only). kyc.* is sensitive (no post grants). Docs only via signed URLs from the viewer's own session; log views.
+- Chat: use `postChatMessage` (instant) from the client; `sendChatMessage` is the no-JS fallback.

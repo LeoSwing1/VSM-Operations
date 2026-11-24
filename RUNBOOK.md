@@ -283,3 +283,9 @@ Apply `supabase/migrations/0018_integration_control_centre.sql` after `0017_work
 4. Google: create the OAuth client (Calendar, Drive, Gmail APIs), set the three env vars, then Settings → Integrations → Google → Connect.
 5. VSM Scholars: /scholars/courses → set fees → create a batch with a trainer → give counsellors the *Course Counsellor* post.
 6. CI: push the repo to GitHub — the workflow runs automatically. For signed-in E2E, add `E2E_EMAIL`/`E2E_PASSWORD` (staging demo login) as repo secrets.
+
+### Blocks 25–27
+1. SQL Editor: run `supabase/repair/catch_up.sql`, then `health_check.sql` (0032–0034 ok).
+2. Growth: /growth/kpis → KPI setup → set monthly targets per post. HR: /growth/reviews → Manage cycles → create → Open.
+3. AI: add `ANTHROPIC_API_KEY` on Vercel → redeploy → Settings → AI assistant → switch on, set budget.
+4. Reports: /reports → Scheduled → e.g. weekly attendance to HR (Mon 09:00), monthly P&L to founders (day 2, 10:00). Accountant: /reports → Accountant pack → month → Download.

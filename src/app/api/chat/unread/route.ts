@@ -9,7 +9,8 @@ export async function GET() {
   try {
     await requireContext();
     const sb = await supabaseServer();
-    const { data, error } = await sb.rpc("chat_unread_summary");
+    // The app is open and just received/checked messages → mark them delivered (✓✓ for the sender).
+    const [{ data, error }] = await Promise.all([sb.rpc("chat_unread_summary"), sb.rpc("chat_mark_delivered")]);
     if (error) return NextResponse.json({ total: 0, channels: {} }, { status: 200, headers: { "cache-control": "no-store" } });
     const rows = (data ?? []) as { channel_id: string; unread: number }[];
     const channels = Object.fromEntries(rows.filter((r) => r.unread > 0).map((r) => [r.channel_id, r.unread]));

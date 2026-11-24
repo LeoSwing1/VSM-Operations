@@ -17,6 +17,9 @@ export const PERMISSION_GROUPS: { group: string; perms: [string, string][] }[] =
       ["people.view_all", "View all employees"],
       ["people.view_team", "View reporting team"],
       ["people.manage", "Create & edit employees"],
+      ["people.onboard", "Add executives, employees and interns (HR post)"],
+      ["people.add_team", "Add executives and interns to their own team (managers)"],
+      ["kyc.verify", "See and verify KYC documents"],
       ["people.reset_password", "Reset employee passwords"],
       ["recruit.view", "View recruitment pipeline"],
       ["recruit.manage", "Manage candidates & interviews"],
@@ -95,6 +98,10 @@ export const PERMISSION_GROUPS: { group: string; perms: [string, string][] }[] =
       ["performance.view_team", "View team performance"],
       ["performance.review", "Review, adjust, approve team snapshots"],
       ["performance.configure", "Configure scoring policies"],
+      ["okr.manage", "Create company OKRs, edit any OKR"],
+      ["kpi.manage", "Define KPIs, enter and verify anyone's KPIs"],
+      ["reviews.manage", "Run 360° review cycles (sees reviewer names)"],
+      ["training.manage", "Manage and verify everyone's training"],
     ],
   },
   {
@@ -125,6 +132,8 @@ export const PERMISSION_GROUPS: { group: string; perms: [string, string][] }[] =
     perms: [
       ["executive.view", "Executive organisation overview"],
       ["reports.view_org", "Organisation reports"],
+      ["reports.schedule", "Schedule emailed reports (for reports they can see)"],
+      ["ai.use", "Use the AI assistant (sees only what they can see)"],
       ["settings.manage", "Organisation settings"],
       ["roles.manage", "Manage roles & permissions"],
       ["audit.view", "View audit log"],
@@ -138,6 +147,7 @@ export const isSensitive = (p: string) =>
   p === "people.reset_password" ||
   p.startsWith("salary.") ||
   p.startsWith("finance.") ||
+  p.startsWith("kyc.") ||
   [
     "roles.manage",
     "audit.view",

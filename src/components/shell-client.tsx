@@ -2,6 +2,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import clsx from "clsx";
 import type { NavItem } from "./shell";
 import { RealtimeUnread } from "@/components/notifications/realtime-unread";
@@ -77,6 +78,14 @@ export function MobileMenu({ children }: { children: React.ReactNode }) {
   const path = usePathname();
   useEffect(() => setOpen(false), [path]);
   useEffect(() => {
+    if (!open) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden"; // page behind doesn't scroll while the menu is open
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [open]);
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -92,11 +101,20 @@ export function MobileMenu({ children }: { children: React.ReactNode }) {
       >
         {open ? "Close" : "Menu"}
       </button>
-      {open && (
-        <div id="mobile-nav" className="fixed inset-0 top-[57px] z-40 overflow-y-auto bg-paper p-5">
-          {children}
-        </div>
-      )}
+      {/* Portal to <body>: the sticky top bar uses backdrop-blur, which would otherwise trap this fixed panel inside the bar. */}
+      {open &&
+        createPortal(
+          <div
+            id="mobile-nav"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Menu"
+            className="fixed inset-x-0 bottom-0 top-[57px] z-40 overflow-y-auto overscroll-contain bg-paper p-5 lg:hidden"
+          >
+            {children}
+          </div>,
+          document.body,
+        )}
     </>
   );
 }

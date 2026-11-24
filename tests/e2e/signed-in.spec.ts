@@ -19,7 +19,19 @@ test("dashboard shows the live clock and profile menu", async ({ page }) => {
 });
 
 test("key pages load without errors", async ({ page }) => {
-  for (const path of ["/attendance", "/tasks", "/chat", "/notifications", "/people/posts"]) {
+  for (const path of [
+    "/attendance",
+    "/tasks",
+    "/chat",
+    "/notifications",
+    "/people/posts",
+    "/growth",
+    "/growth/kpis",
+    "/growth/reviews",
+    "/growth/training",
+    "/reports",
+    "/assistant",
+  ]) {
     const r = await page.goto(path);
     expect(r?.status(), path).toBeLessThan(400);
     await expect(page.locator("main")).not.toContainText("Application error");

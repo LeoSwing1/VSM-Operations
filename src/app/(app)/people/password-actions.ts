@@ -74,6 +74,7 @@ export async function setTemporaryPassword(_p: PwState, fd: FormData): Promise<P
   const { error } = await supabaseAdmin().auth.admin.updateUserById(t.e.user_id!, {
     password,
     user_metadata: { must_change_password: true },
+    email_confirm: true, // HR is emailing this address directly; an unconfirmed login would refuse to sign in
   });
   if (error) return { ok: false, message: `Couldn't set the password: ${error.message}` };
   await audit(t.sb, "auth.temporary_password_set", t.e.id);
@@ -91,12 +92,15 @@ export async function resendWelcome(_p: PwState, fd: FormData): Promise<PwState>
   const t = await target(fd);
   if ("err" in t) return { ok: false, message: t.err! };
   try {
-    await sendWelcome(t.e.id, "link");
+    await sendWelcome(t.e.id, "password");
   } catch (e) {
     return { ok: false, message: `Couldn't send: ${(e as Error).message}` };
   }
   await audit(t.sb, "employee.welcome_sent", t.e.id);
-  return { ok: true, message: `Welcome email with a set-password link sent to ${t.e.official_email}.` };
+  return {
+    ok: true,
+    message: `Welcome email sent to ${t.e.official_email} with their Employee ID, login email and a temporary password (they change it at first sign-in).`,
+  };
 }
 
 /** New temporary password, emailed to the employee AND shown once here. Must be changed at first sign-in. */
@@ -108,6 +112,7 @@ export async function emailNewPassword(_p: PwState, fd: FormData): Promise<PwSta
   const { error } = await supabaseAdmin().auth.admin.updateUserById(t.e.user_id, {
     password,
     user_metadata: { must_change_password: true },
+    email_confirm: true, // HR is emailing this address directly; an unconfirmed login would refuse to sign in
   });
   if (error) return { ok: false, message: `Couldn't set the password: ${error.message}` };
   const provider = await getProvider();

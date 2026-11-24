@@ -4,7 +4,7 @@ import { supabaseServer } from "@/lib/supabase/server";
 import { Badge, Card, Empty, Field, Flash, PageHeader, TableWrap } from "@/components/ui";
 import { createDepartment, createEmployee } from "./actions";
 import { EmployeeFields } from "./employee-form";
-import { assignableRoles } from "@/lib/data/roles";
+import { addMode, assignableRoles } from "@/lib/data/roles";
 
 export const metadata = { title: "People" };
 
@@ -13,26 +13,38 @@ export default async function People({ searchParams }: { searchParams: Promise<R
   const ctx = await requirePerm("people.view_all", "people.view_team");
   const sb = await supabaseServer();
   const manage = can(ctx, "people.manage");
+  const adding = addMode(ctx); // "all" (HR Manager/Admin), "juniors" (HR post), "team" (managers), or null
   let query = sb
     .from("employees")
     .select(
-      "id, employee_code, full_name, designation, role, status, user_id, department:departments(name), manager:employees!employees_manager_id_fkey(full_name)",
+      "id, employee_code, full_name, designation, role, status, user_id, department:departments!department_id(name), manager:employees!manager_id(full_name)",
     )
     .order("full_name");
   if (sp.q) query = query.or(`full_name.ilike.%${sp.q.replace(/[%,()]/g, "")}%,employee_code.ilike.%${sp.q.replace(/[%,()]/g, "")}%`);
   if (sp.dept) query = query.eq("department_id", sp.dept);
-  if (sp.status) query = query.eq("status", sp.status);
+  if (sp.status === "ALL") {
+    /* everyone, including exited */
+  } else if (sp.status) query = query.eq("status", sp.status);
   else query = query.neq("status", "EXITED");
-  const [{ data: people }, { data: depts }, { data: shifts }, { data: dir }, assignable, { data: posts }, { data: nextCode }] =
-    await Promise.all([
-      query,
-      sb.from("departments").select("id, name").order("name"),
-      sb.from("shifts").select("id, name"),
-      sb.from("employee_directory").select("id, full_name").order("full_name"),
-      assignableRoles(sb, ctx),
-      sb.from("designations").select("title").eq("is_active", true).order("sort"),
-      sb.rpc("next_employee_code", { p_org: ctx.org_id }),
-    ]);
+  const [
+    { data: people, error: listErr },
+    { data: depts },
+    { data: shifts },
+    { data: dir },
+    assignable,
+    { data: posts },
+    { data: nextCode },
+  ] = await Promise.all([
+    query,
+    sb.from("departments").select("id, name").order("name"),
+    sb.from("shifts").select("id, name"),
+    sb.from("employee_directory").select("id, full_name").order("full_name"),
+    assignableRoles(sb, ctx),
+    sb.from("designations").select("title").eq("is_active", true).order("sort"),
+    sb.rpc("next_employee_code", { p_org: ctx.org_id }),
+  ]);
+  // Teams this person may add someone into (RLS on org_team_members still decides).
+  const { data: myTeams } = adding ? await sb.rpc("my_manageable_teams") : { data: [] as { id: string; name: string }[] };
 
   return (
     <>
@@ -40,38 +52,77 @@ export default async function People({ searchParams }: { searchParams: Promise<R
         <Link href="/people/posts" className="btn-ghost">
           Posts & teams
         </Link>
-        {manage && (
+        {adding && (
           <Link href={sp.new ? "/people" : "/people?new=1"} className="btn-primary">
             {sp.new ? "Close" : "Add employee"}
           </Link>
         )}
       </PageHeader>
       <Flash sp={sp} />
+      {sp.dup && /^[0-9a-f-]{36}$/.test(sp.dup) && (
+        <p className="-mt-3 mb-6 text-sm">
+          <Link href={`/people/${sp.dup}`} className="btn-ghost">
+            Open the existing profile →
+          </Link>
+        </p>
+      )}
+      {listErr && (
+        <p role="alert" className="mb-6 rounded-xl border border-danger/50 bg-danger/10 px-4 py-3 text-sm text-danger">
+          The people list could not load: {listErr.message}
+        </p>
+      )}
 
-      {manage && sp.new && (
-        <Card title="New employee" className="mb-6">
+      {adding && sp.new && (
+        <Card
+          title="New employee"
+          className="mb-6"
+          hint={
+            adding === "team"
+              ? "You can add executives, employees and interns to your own team. HR adds managers."
+              : adding === "juniors"
+                ? "You can add executives, employees and interns. The HR Manager adds managers."
+                : undefined
+          }
+        >
           <form action={createEmployee} className="space-y-4">
             <EmployeeFields
               departments={(depts ?? []) as any}
-              managers={(dir ?? []).map((d) => ({ id: d.id, name: d.full_name }))}
+              managers={(adding === "team" ? (dir ?? []).filter((d) => d.id === ctx.employee_id) : (dir ?? [])).map((d) => ({
+                id: d.id,
+                name: d.full_name,
+              }))}
               shifts={(shifts ?? []) as any}
               assignable={assignable}
               posts={(posts ?? []).map((x) => x.title)}
               nextCode={typeof nextCode === "string" ? `Auto: ${nextCode}` : undefined}
             />
+            {(myTeams ?? []).length > 0 && (
+              <Field label="Add to team (optional)">
+                <select name="team_id" className="input" defaultValue={(myTeams ?? []).length === 1 ? (myTeams ?? [])[0]!.id : ""}>
+                  <option value="">—</option>
+                  {(myTeams ?? []).map((t: { id: string; name: string }) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
             <fieldset className="space-y-1.5 rounded-xl border border-line p-3 text-sm">
               <legend className="px-1 text-xs font-semibold uppercase tracking-wider text-muted">Welcome email</legend>
               <label className="flex items-center gap-2">
-                <input type="radio" name="welcome" value="link" defaultChecked /> Send details + a set-password link (recommended)
+                <input type="radio" name="welcome" value="password" defaultChecked /> Send Employee ID, login email + a temporary password
+                (changed at first sign-in)
               </label>
               <label className="flex items-center gap-2">
-                <input type="radio" name="welcome" value="password" /> Send details + a temporary password (changed at first sign-in)
+                <input type="radio" name="welcome" value="link" /> Send details + a set-password link instead
               </label>
               <label className="flex items-center gap-2">
                 <input type="radio" name="welcome" value="none" /> Don&apos;t create a login yet
               </label>
               <p className="text-xs text-muted">
-                The email includes their name, Employee ID, post, department, team, manager and joining date.
+                The email includes their name, Employee ID, login email, post, department, team, manager and joining date. A KYC request is
+                sent to their chat automatically.
               </p>
             </fieldset>
             <button className="btn-primary">Create employee</button>
@@ -96,6 +147,7 @@ export default async function People({ searchParams }: { searchParams: Promise<R
         <Field label="Status">
           <select name="status" defaultValue={sp.status ?? ""} className="input">
             <option value="">Current</option>
+            <option value="ALL">All (incl. exited)</option>
             {["ACTIVE", "PROBATION", "NOTICE", "ON_LEAVE", "EXITED"].map((s) => (
               <option key={s}>{s}</option>
             ))}
@@ -108,7 +160,11 @@ export default async function People({ searchParams }: { searchParams: Promise<R
         {(people ?? []).length === 0 ? (
           <Empty
             title="No one here yet"
-            hint={manage ? "Add your first employee above." : "No employees in your scope match this filter."}
+            hint={
+              manage
+                ? "Nobody matches this filter. Try Status → All (incl. exited), or add your first employee above."
+                : "No employees in your scope match this filter."
+            }
           />
         ) : (
           <TableWrap>

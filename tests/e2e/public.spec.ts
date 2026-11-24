@@ -7,7 +7,17 @@ test("login page renders the form and the connection test link", async ({ page }
 });
 
 test("protected pages redirect to login", async ({ page }) => {
-  for (const path of ["/dashboard", "/operations", "/scholars", "/payroll/statutory"]) {
+  for (const path of [
+    "/dashboard",
+    "/operations",
+    "/scholars",
+    "/payroll/statutory",
+    "/growth",
+    "/reports",
+    "/assistant",
+    "/kyc",
+    "/people/kyc",
+  ]) {
     await page.goto(path);
     await expect(page).toHaveURL(/\/login/);
   }
@@ -48,4 +58,17 @@ test("security headers are set", async ({ request }) => {
   expect(r.headers()["x-frame-options"]).toBe("DENY");
   expect(r.headers()["x-content-type-options"]).toBe("nosniff");
   expect(r.headers()["permissions-policy"]).toContain("geolocation=(self)");
+});
+
+test("AI chat, report downloads and the accountant pack need a signed-in session", async ({ request }) => {
+  const chat = await request.post("/api/ai/chat", { data: { messages: [{ role: "user", content: "hi" }] }, maxRedirects: 0 });
+  expect([401, 403, 307, 308]).toContain(chat.status());
+  for (const path of [
+    "/api/reports/runs/00000000-0000-0000-0000-000000000000",
+    "/api/reports/accountant?month=2026-10",
+    "/api/cron/reports",
+  ]) {
+    const r = await request.get(path, { maxRedirects: 0 });
+    expect(r.status(), path).not.toBe(200);
+  }
 });

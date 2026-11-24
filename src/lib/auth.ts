@@ -26,6 +26,8 @@ export interface Ctx {
   role: Role;
   role_level: number;
   photo_url: string | null;
+  is_owner?: boolean;
+  employee_code?: string | null;
   permissions: string[];
 }
 

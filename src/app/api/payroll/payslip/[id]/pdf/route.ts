@@ -15,7 +15,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   const { data: e } = await sb
     .from("payroll_entries")
     .select(
-      "*, run:payroll_runs(period_start, period_end), employee:employees!payroll_entries_employee_id_fkey(full_name, employee_code, designation, joining_date, department:departments(name))",
+      "*, run:payroll_runs(period_start, period_end), employee:employees!payroll_entries_employee_id_fkey(full_name, employee_code, designation, joining_date, department:departments!department_id(name))",
     )
     .eq("id", id)
     .maybeSingle();

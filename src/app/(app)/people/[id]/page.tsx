@@ -9,7 +9,8 @@ import { fmtDate, fmtDateTime, localDate, monthBounds } from "@/lib/engines/time
 import { EmployeeFields } from "../employee-form";
 import { LoginPanel } from "../login-panel";
 import { copyDocumentToDrive } from "../../settings/integrations/google-actions";
-import { resendInvite, updateEmployee, toggleOnboardingItem, addOnboardingItem, removeOnboardingItem } from "../actions";
+import { resendInvite, updateEmployee, toggleOnboardingItem, addOnboardingItem, removeOnboardingItem, setOwner } from "../actions";
+import { openDirectChat } from "../../chat/actions";
 import { assignableRoles } from "@/lib/data/roles";
 import {
   uploadEmployeeDocument,
@@ -37,6 +38,7 @@ const TABS = [
   { key: "leave", label: "Leave" },
   { key: "performance", label: "Performance" },
   { key: "salary", label: "Salary" },
+  { key: "kyc", label: "KYC" },
   { key: "activity", label: "Activity" },
 ];
 
@@ -51,21 +53,28 @@ export default async function Employee360({
   if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const ctx = await requireContext();
   const sb = await supabaseServer();
-  const { data: e } = await sb
+  const { data: e, error: loadErr } = await sb
     .from("employees")
     .select(
-      "*, department:departments(name), manager:employees!employees_manager_id_fkey(id, full_name), shift:shifts(name, start_time, end_time)",
+      "*, department:departments!department_id(name), manager:employees!manager_id(id, full_name), shift:shifts(name, start_time, end_time)",
     )
     .eq("id", id)
     .maybeSingle();
-  if (!e) notFound(); // RLS: out of scope looks identical to non-existent
+  if (loadErr) throw new Error(`Profile could not load: ${loadErr.message}`); // a query problem, not "no access" — show it
+  if (!e) {
+    // Outside your access: show the basic company profile card (no salary, documents or personal details).
+    const { data: card } = await sb.rpc("employee_card", { p_emp: id });
+    if (!card) notFound();
+    return <ProfileCard card={card as CardData} self={id === ctx.employee_id} />;
+  }
   const self = id === ctx.employee_id;
   const manage = can(ctx, "people.manage");
   const salaryAllowed = self || can(ctx, "payroll.view_all");
   const tabs = [
     ...TABS.filter((t) => t.key !== "salary" || salaryAllowed)
       .filter((t) => t.key !== "activity" || self || manage || can(ctx, "audit.view") || can(ctx, "people.view_team"))
-      .filter((t) => t.key !== "onboarding" || self || manage || can(ctx, "people.view_team")),
+      .filter((t) => t.key !== "onboarding" || self || manage || can(ctx, "people.view_team"))
+      .filter((t) => t.key !== "kyc" || self || can(ctx, "kyc.verify")),
     ...(manage ? [{ key: "edit", label: "Edit" }] : []),
   ];
   const tab = tabs.some((t) => t.key === sp.tab) ? sp.tab! : "overview";
@@ -81,6 +90,14 @@ export default async function Employee360({
       <PageHeader eyebrow={`${e.employee_code} · ${ROLE_LABEL[e.role as Role]}`} title={e.full_name}>
         <Badge>{e.status}</Badge>
         {e.role === "SUPER_ADMIN" && <Badge tone="green">PROTECTED · ONLY SUPER ADMIN</Badge>}
+        {e.is_owner && <Badge tone="green">OWNER</Badge>}
+        {ctx.role === "SUPER_ADMIN" && e.role === "ADMIN" && (
+          <form action={setOwner}>
+            <input type="hidden" name="id" value={e.id} />
+            <input type="hidden" name="owner" value={e.is_owner ? "0" : "1"} />
+            <button className="btn-ghost">{e.is_owner ? "Remove as co-owner" : "Make co-owner"}</button>
+          </form>
+        )}
         {e.is_demo && <Badge tone="amber">DEMO</Badge>}
       </PageHeader>
       <Flash sp={sp} />
@@ -100,6 +117,7 @@ export default async function Employee360({
       {tab === "leave" && <LeaveTab sb={sb} id={id} />}
       {tab === "performance" && <PerformanceTab sb={sb} id={id} start={start} end={end} tz={tz} />}
       {tab === "salary" && salaryAllowed && <SalaryTab sb={sb} id={id} />}
+      {tab === "kyc" && (self || can(ctx, "kyc.verify")) && <KycTab sb={sb} id={id} self={self} />}
       {tab === "activity" && <ActivityTab sb={sb} id={id} tz={tz} />}
       {tab === "edit" && manage && <EditTab sb={sb} e={e} assignable={await assignableRoles(sb, ctx)} />}
     </>
@@ -857,6 +875,100 @@ async function EditTab({ sb, e, assignable }: { sb: SB; e: any; assignable: { ro
         </div>
         <button className="btn-primary">Save changes</button>
       </form>
+    </Card>
+  );
+}
+
+type CardData = {
+  id: string;
+  full_name: string;
+  employee_code: string;
+  designation: string | null;
+  role: Role;
+  is_owner: boolean;
+  photo_url: string | null;
+  official_email: string;
+  status: string;
+  work_location: string | null;
+  joining_date: string | null;
+  department: string | null;
+  manager: { id: string; full_name: string } | null;
+  teams: { name: string; role: string }[];
+};
+function ProfileCard({ card, self }: { card: CardData; self: boolean }) {
+  const rows: [string, React.ReactNode][] = [
+    [
+      "Employee ID",
+      <span key="c" className="font-mono font-semibold">
+        {card.employee_code}
+      </span>,
+    ],
+    ["Post", card.designation ?? ROLE_LABEL[card.role]],
+    ["Department", card.department ?? "—"],
+    ["Teams", card.teams.length ? card.teams.map((t) => t.name + (t.role === "LEAD" ? " (lead)" : "")).join(", ") : "—"],
+    ["Reporting to", card.manager?.full_name ?? "—"],
+    [
+      "Work email",
+      <a key="m" href={`mailto:${card.official_email}`} className="hover:text-volt">
+        {card.official_email}
+      </a>,
+    ],
+    ["Location", card.work_location ?? "—"],
+    ["Joined", card.joining_date ? fmtDate(card.joining_date) : "—"],
+  ];
+  return (
+    <>
+      <PageHeader
+        eyebrow={`${card.employee_code} · ${card.is_owner || card.role === "SUPER_ADMIN" ? "Owner" : (card.designation ?? ROLE_LABEL[card.role])}`}
+        title={card.full_name}
+      >
+        {!self && (
+          <form action={openDirectChat}>
+            <input type="hidden" name="employee_id" value={card.id} />
+            <button className="btn-primary">Message</button>
+          </form>
+        )}
+      </PageHeader>
+      <Card title="Profile" hint="The company profile everyone can see. Salary, documents and personal details stay private.">
+        <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
+          {rows.map(([k, v]) => (
+            <div key={k}>
+              <dt className="text-xs text-muted">{k}</dt>
+              <dd className="mt-0.5 text-sm">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      </Card>
+    </>
+  );
+}
+
+async function KycTab({ sb, id, self }: { sb: SB; id: string; self: boolean }) {
+  const [{ data: k }, { data: docs }] = await Promise.all([
+    sb.from("kyc_profiles").select("status, submitted_at, reviewed_at, review_note").eq("employee_id", id).maybeSingle(),
+    sb.from("kyc_documents").select("doc_type, status").eq("employee_id", id).neq("status", "REPLACED"),
+  ]);
+  const verified = (docs ?? []).filter((d) => d.status === "VERIFIED").length;
+  return (
+    <Card title="KYC" hint="Personal details and identity documents, verified by HR.">
+      <p className="text-sm">
+        Status: <Badge>{k?.status ?? "NOT_STARTED"}</Badge>
+        <span className="ml-3 text-muted">
+          {(docs ?? []).length} documents uploaded · {verified} verified
+        </span>
+      </p>
+      {k?.review_note && <p className="mt-2 text-sm text-muted">HR note: {k.review_note}</p>}
+      <div className="mt-4 flex gap-2">
+        {self ? (
+          <Link className="btn-primary" href="/kyc">
+            {k?.status === "VERIFIED" ? "View my KYC" : "Complete my KYC"}
+          </Link>
+        ) : (
+          <Link className="btn-primary" href={`/people/kyc?e=${id}`}>
+            Review KYC
+          </Link>
+        )}
+      </div>
     </Card>
   );
 }

@@ -6446,3 +6446,1574 @@ create trigger employees_seed_scholars after insert on employees for each row ex
 -- Audit trail for the money and student records.
 drop trigger if exists scholar_students_touch on scholar_students;
 create trigger scholar_students_touch before update on scholar_students for each row execute function touch_updated_at();
+
+-- >>> 0032_block25_okr_kpi_reviews.sql
+-- =============================================================================
+-- 0032 · Block 25 — Performance & growth: OKRs (company → team → personal) with check-ins, KPI definitions per post
+-- (auto-calculated from tasks/attendance/CRM/Scholars where possible, manual + verified otherwise), 360° review
+-- cycles with anonymous peer feedback, and training records.
+-- =============================================================================
+
+-- ---------- OKRs ----------
+create table if not exists okr_objectives (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  title text not null check (length(trim(title)) between 3 and 200),
+  description text check (length(description) <= 2000),
+  level text not null check (level in ('COMPANY','TEAM','PERSONAL')),
+  team_id uuid references org_teams(id) on delete cascade,
+  owner_id uuid not null references employees(id),
+  parent_id uuid references okr_objectives(id) on delete set null,
+  period_start date not null, period_end date not null,
+  status text not null default 'ACTIVE' check (status in ('DRAFT','ACTIVE','CLOSED')),
+  created_by uuid not null references employees(id),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  check (period_end > period_start),
+  check ((level = 'TEAM') = (team_id is not null))
+);
+create index if not exists okr_objectives_period on okr_objectives(org_id, period_start, period_end);
+create table if not exists okr_key_results (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  objective_id uuid not null references okr_objectives(id) on delete cascade,
+  title text not null check (length(trim(title)) between 3 and 200),
+  metric text not null default 'NUMBER' check (metric in ('NUMBER','PERCENT','CURRENCY','BOOLEAN')),
+  start_value numeric(14,2) not null default 0,
+  target_value numeric(14,2) not null,
+  current_value numeric(14,2) not null default 0,
+  unit text check (length(unit) <= 20),
+  weight int not null default 1 check (weight between 1 and 10),
+  owner_id uuid references employees(id) on delete set null,
+  confidence text not null default 'ON_TRACK' check (confidence in ('ON_TRACK','AT_RISK','OFF_TRACK')),
+  updated_at timestamptz not null default now(),
+  check (target_value <> start_value)
+);
+create table if not exists okr_checkins (
+  id bigint generated always as identity primary key,
+  org_id uuid not null references organizations(id) on delete cascade,
+  key_result_id uuid not null references okr_key_results(id) on delete cascade,
+  value numeric(14,2) not null,
+  confidence text not null check (confidence in ('ON_TRACK','AT_RISK','OFF_TRACK')),
+  note text check (length(note) <= 1000),
+  author_id uuid not null references employees(id),
+  created_at timestamptz not null default now()
+);
+drop trigger if exists okr_objectives_touch on okr_objectives;
+create trigger okr_objectives_touch before update on okr_objectives for each row execute function touch_updated_at();
+
+-- Progress 0–100 for one key result (works for "lower is better" KRs where target < start).
+create or replace function okr_kr_progress(p_start numeric, p_target numeric, p_current numeric) returns numeric
+language sql immutable as $$
+  select round(greatest(0, least(1, (p_current - p_start) / nullif(p_target - p_start, 0))) * 100, 1)
+$$;
+create or replace function okr_objective_progress(p_objective uuid) returns numeric
+language sql stable security definer set search_path = public, pg_temp as $$
+  select round(sum(okr_kr_progress(start_value, target_value, current_value) * weight) / nullif(sum(weight), 0), 1)
+    from okr_key_results where objective_id = p_objective
+$$;
+grant execute on function okr_kr_progress(numeric, numeric, numeric), okr_objective_progress(uuid) to authenticated;
+
+-- Who may edit an objective: OKR managers for anything; team leads/managers for their team; the owner and the
+-- owner's managers for personal OKRs.
+create or replace function can_edit_objective(p_objective uuid) returns boolean
+language sql stable security definer set search_path = public, pg_temp as $$
+  select exists (select 1 from okr_objectives o where o.id = p_objective and o.org_id = current_org_id() and (
+    has_perm('okr.manage')
+    or (o.level = 'TEAM' and exists (select 1 from org_team_members m where m.team_id = o.team_id
+          and m.employee_id = current_employee_id() and m.member_role in ('LEAD','MANAGER')))
+    or (o.level = 'PERSONAL' and (o.owner_id = current_employee_id() or is_in_my_team(o.owner_id)))))
+$$;
+grant execute on function can_edit_objective(uuid) to authenticated;
+
+alter table okr_objectives enable row level security;
+alter table okr_key_results enable row level security;
+alter table okr_checkins enable row level security;
+-- Company and team OKRs are visible to everyone in the company (alignment); personal ones to the owner, their managers and HR/performance.
+drop policy if exists okr_read on okr_objectives;
+create policy okr_read on okr_objectives for select to authenticated using (org_id = current_org_id() and (
+  level in ('COMPANY','TEAM') or owner_id = current_employee_id() or is_in_my_team(owner_id)
+  or has_perm('performance.view_all') or has_perm('okr.manage')));
+drop policy if exists okr_insert on okr_objectives;
+create policy okr_insert on okr_objectives for insert to authenticated with check (org_id = current_org_id() and created_by = current_employee_id() and (
+  has_perm('okr.manage')
+  or (level = 'TEAM' and exists (select 1 from org_team_members m where m.team_id = okr_objectives.team_id
+        and m.employee_id = current_employee_id() and m.member_role in ('LEAD','MANAGER')))
+  or (level = 'PERSONAL' and (owner_id = current_employee_id() or is_in_my_team(owner_id)))));
+drop policy if exists okr_update on okr_objectives;
+create policy okr_update on okr_objectives for update to authenticated using (can_edit_objective(id)) with check (org_id = current_org_id());
+drop policy if exists okr_delete on okr_objectives;
+create policy okr_delete on okr_objectives for delete to authenticated using (can_edit_objective(id) and status = 'DRAFT');
+revoke update on okr_objectives from authenticated;
+grant update (title, description, parent_id, period_start, period_end, status, owner_id) on okr_objectives to authenticated;
+
+drop policy if exists kr_read on okr_key_results;
+create policy kr_read on okr_key_results for select to authenticated
+  using (org_id = current_org_id() and exists (select 1 from okr_objectives o where o.id = objective_id));
+drop policy if exists kr_write on okr_key_results;
+create policy kr_write on okr_key_results for all to authenticated
+  using (org_id = current_org_id() and can_edit_objective(objective_id))
+  with check (org_id = current_org_id() and can_edit_objective(objective_id));
+revoke update on okr_key_results from authenticated;
+grant update (title, metric, start_value, target_value, unit, weight, owner_id) on okr_key_results to authenticated;
+
+drop policy if exists checkin_read on okr_checkins;
+create policy checkin_read on okr_checkins for select to authenticated
+  using (org_id = current_org_id() and exists (select 1 from okr_key_results k where k.id = key_result_id));
+revoke insert, update, delete on okr_checkins from authenticated;
+
+-- Check-in: the KR owner or anyone who can edit the objective. Updates the KR's current value.
+create or replace function okr_checkin(p_kr uuid, p_value numeric, p_confidence text, p_note text default null) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare k okr_key_results; o okr_objectives;
+begin
+  select * into k from okr_key_results where id = p_kr and org_id = current_org_id() for update;
+  if k.id is null then raise exception 'Unknown key result.' using errcode = '42501'; end if;
+  select * into o from okr_objectives where id = k.objective_id;
+  if not (k.owner_id = current_employee_id() or can_edit_objective(o.id)) then
+    raise exception 'Only the key result owner or the objective''s editors can check in.' using errcode = '42501';
+  end if;
+  if o.status <> 'ACTIVE' then raise exception 'This objective is not active.'; end if;
+  if p_confidence not in ('ON_TRACK','AT_RISK','OFF_TRACK') then raise exception 'Unknown confidence.'; end if;
+  if k.metric = 'BOOLEAN' and p_value not in (0, 1) then raise exception 'Use 0 (not done) or 1 (done).'; end if;
+  insert into okr_checkins(org_id, key_result_id, value, confidence, note, author_id)
+  values (k.org_id, k.id, p_value, p_confidence, nullif(trim(p_note), ''), current_employee_id());
+  update okr_key_results set current_value = p_value, confidence = p_confidence, updated_at = now() where id = k.id;
+  if o.owner_id <> current_employee_id() then
+    perform notify(o.org_id, o.owner_id, 'PERFORMANCE', 'OKR check-in · ' || left(k.title, 80),
+      p_confidence || coalesce(' — ' || left(p_note, 100), ''), '/performance/okrs?o=' || o.id, 'okr-ci-' || currval(pg_get_serial_sequence('okr_checkins','id')));
+  end if;
+end $$;
+grant execute on function okr_checkin(uuid, numeric, text, text) to authenticated;
+
+-- ---------- KPIs per post ----------
+create table if not exists kpi_definitions (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  designation_id uuid references designations(id) on delete cascade,  -- null = applies to everyone
+  name text not null check (length(trim(name)) between 2 and 120),
+  unit text check (length(unit) <= 20),
+  direction text not null default 'HIGHER' check (direction in ('HIGHER','LOWER')),
+  target numeric(14,2),
+  source text not null default 'MANUAL' check (source in ('MANUAL','TASKS_COMPLETED','TASKS_ON_TIME_PCT','ATTENDANCE_DAYS',
+    'DAILY_UPDATES','LEADS_CONTACTED','LEADS_WON','SCHOLAR_ADMISSIONS','PROJECT_HOURS','TASK_QUALITY_AVG')),
+  weight int not null default 1 check (weight between 1 and 10),
+  is_active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists kpi_definitions_uq on kpi_definitions(org_id, coalesce(designation_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(name));
+
+create table if not exists kpi_values (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  kpi_id uuid not null references kpi_definitions(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  period_month date not null check (extract(day from period_month) = 1),
+  value numeric(14,2) not null,
+  source text not null default 'MANUAL' check (source in ('MANUAL','AUTO')),
+  note text check (length(note) <= 500),
+  entered_by uuid references employees(id),
+  verified_by uuid references employees(id), verified_at timestamptz,
+  updated_at timestamptz not null default now(),
+  unique (kpi_id, employee_id, period_month),
+  check (verified_by is null or verified_by <> employee_id)
+);
+
+-- Auto value for one employee and month. Pure read of existing records; never writes.
+create or replace function kpi_auto_value(p_source text, p_emp uuid, p_start date, p_end date) returns numeric
+language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare v numeric; tz text;
+begin
+  select o.timezone into tz from employees e join organizations o on o.id = e.org_id where e.id = p_emp;
+  tz := coalesce(tz, 'Asia/Kolkata');
+  case p_source
+    when 'TASKS_COMPLETED' then
+      select count(*) into v from tasks where assignee_id = p_emp and status = 'COMPLETED'
+        and (completed_at at time zone tz)::date between p_start and p_end;
+    when 'TASKS_ON_TIME_PCT' then
+      select round(100.0 * count(*) filter (where deadline is null or completed_at <= deadline) / nullif(count(*), 0), 1) into v
+        from tasks where assignee_id = p_emp and status = 'COMPLETED' and (completed_at at time zone tz)::date between p_start and p_end;
+    when 'TASK_QUALITY_AVG' then
+      select round(avg(quality_score), 1) into v from tasks where assignee_id = p_emp and status = 'COMPLETED'
+        and quality_score is not null and (completed_at at time zone tz)::date between p_start and p_end;
+    when 'ATTENDANCE_DAYS' then
+      select count(distinct (occurred_at at time zone tz)::date) into v from attendance_events
+        where employee_id = p_emp and event_type = 'CLOCK_IN' and (occurred_at at time zone tz)::date between p_start and p_end;
+    when 'DAILY_UPDATES' then
+      select count(*) into v from daily_updates where employee_id = p_emp and work_date between p_start and p_end;
+    when 'LEADS_CONTACTED' then
+      select count(distinct lead_id) into v from lead_activities where actor_id = p_emp and kind in ('CALL','EMAIL','MEETING','NOTE')
+        and (created_at at time zone tz)::date between p_start and p_end;
+    when 'LEADS_WON' then
+      select count(distinct l.id) into v from leads l join lead_activities a on a.lead_id = l.id and a.kind = 'STATUS'
+        where l.assigned_to = p_emp and l.status = 'WON' and (a.created_at at time zone tz)::date between p_start and p_end;
+    when 'SCHOLAR_ADMISSIONS' then
+      select count(*) into v from scholar_enrollments en join scholar_students s on s.id = en.student_id
+        where coalesce(s.counsellor_id, en.created_by) = p_emp and (en.enrolled_at at time zone tz)::date between p_start and p_end;
+    when 'PROJECT_HOURS' then
+      select coalesce(sum(hours), 0) into v from project_time_entries where employee_id = p_emp and status = 'APPROVED'
+        and work_date between p_start and p_end;
+    else v := null;
+  end case;
+  return v;
+end $$;
+revoke all on function kpi_auto_value(text, uuid, date, date) from public, anon, authenticated;
+
+-- Recalculate AUTO KPI values for a month (default: this month). KPI managers, or the scheduler (service role).
+create or replace function kpi_refresh(p_org uuid, p_month date default null) returns int
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare v_start date := date_trunc('month', coalesce(p_month, (now() at time zone 'Asia/Kolkata')::date))::date;
+        v_end date := (date_trunc('month', coalesce(p_month, (now() at time zone 'Asia/Kolkata')::date)) + interval '1 month - 1 day')::date;
+        r record; v numeric; n int := 0;
+begin
+  if auth.uid() is not null and not (p_org = current_org_id() and has_perm('kpi.manage')) then
+    raise exception 'Only KPI managers can recalculate KPIs.' using errcode = '42501';
+  end if;
+  for r in select k.id as kpi_id, k.source, e.id as emp from kpi_definitions k
+             join employees e on e.org_id = k.org_id and e.status <> 'EXITED'
+              and (k.designation_id is null or exists (select 1 from designations d where d.id = k.designation_id and lower(d.title) = lower(e.designation)))
+            where k.org_id = p_org and k.is_active and k.source <> 'MANUAL' loop
+    v := kpi_auto_value(r.source, r.emp, v_start, v_end);
+    if v is null then continue; end if;
+    insert into kpi_values(org_id, kpi_id, employee_id, period_month, value, source)
+    values (p_org, r.kpi_id, r.emp, v_start, v, 'AUTO')
+    on conflict (kpi_id, employee_id, period_month) do update set value = excluded.value, updated_at = now()
+      where kpi_values.source = 'AUTO';
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
+revoke all on function kpi_refresh(uuid, date) from public, anon;
+grant execute on function kpi_refresh(uuid, date) to authenticated;
+
+alter table kpi_definitions enable row level security;
+alter table kpi_values enable row level security;
+drop policy if exists kpi_def_read on kpi_definitions;
+create policy kpi_def_read on kpi_definitions for select to authenticated using (org_id = current_org_id());
+drop policy if exists kpi_def_write on kpi_definitions;
+create policy kpi_def_write on kpi_definitions for all to authenticated
+  using (org_id = current_org_id() and has_perm('kpi.manage')) with check (org_id = current_org_id() and has_perm('kpi.manage'));
+drop policy if exists kpi_val_read on kpi_values;
+create policy kpi_val_read on kpi_values for select to authenticated using (org_id = current_org_id() and (
+  employee_id = current_employee_id() or is_in_my_team(employee_id) or has_perm('performance.view_all') or has_perm('kpi.manage')));
+-- Manual values: the employee (unverified), their managers, or KPI managers. AUTO values only come from kpi_refresh().
+drop policy if exists kpi_val_insert on kpi_values;
+create policy kpi_val_insert on kpi_values for insert to authenticated with check (org_id = current_org_id() and source = 'MANUAL'
+  and entered_by = current_employee_id() and verified_by is null and verified_at is null
+  and (employee_id = current_employee_id() or is_in_my_team(employee_id) or has_perm('kpi.manage'))
+  and exists (select 1 from kpi_definitions k where k.id = kpi_id and k.source = 'MANUAL' and k.org_id = current_org_id()));
+drop policy if exists kpi_val_update on kpi_values;
+create policy kpi_val_update on kpi_values for update to authenticated
+  using (org_id = current_org_id() and source = 'MANUAL' and verified_at is null
+         and (employee_id = current_employee_id() or is_in_my_team(employee_id) or has_perm('kpi.manage')))
+  with check (org_id = current_org_id() and source = 'MANUAL');
+revoke update on kpi_values from authenticated;
+grant update (value, note, entered_by) on kpi_values to authenticated;
+
+create or replace function kpi_verify(p_id uuid) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare v kpi_values;
+begin
+  select * into v from kpi_values where id = p_id and org_id = current_org_id() for update;
+  if v.id is null then raise exception 'Unknown KPI value.' using errcode = '42501'; end if;
+  if v.employee_id = current_employee_id() then raise exception 'You can''t verify your own KPI.' using errcode = '42501'; end if;
+  if not (is_in_my_team(v.employee_id) or has_perm('kpi.manage')) then raise exception 'Only their manager can verify.' using errcode = '42501'; end if;
+  update kpi_values set verified_by = current_employee_id(), verified_at = now() where id = p_id;
+end $$;
+grant execute on function kpi_verify(uuid) to authenticated;
+
+-- ---------- 360° reviews ----------
+create table if not exists review_cycles (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  name text not null check (length(trim(name)) between 3 and 120),
+  period_start date not null, period_end date not null,
+  questions jsonb not null default '[{"key":"quality","label":"Quality of work"},{"key":"ownership","label":"Ownership & reliability"},{"key":"communication","label":"Communication"},{"key":"teamwork","label":"Teamwork & helpfulness"},{"key":"growth","label":"Learning & growth"}]',
+  anonymous_peers boolean not null default true,
+  peers_per_person int not null default 2 check (peers_per_person between 0 and 6),
+  status text not null default 'DRAFT' check (status in ('DRAFT','OPEN','CLOSED')),
+  due_on date,
+  created_by uuid not null references employees(id),
+  created_at timestamptz not null default now(),
+  check (period_end >= period_start), check (jsonb_typeof(questions) = 'array' and jsonb_array_length(questions) between 1 and 12)
+);
+create table if not exists review_assignments (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  cycle_id uuid not null references review_cycles(id) on delete cascade,
+  subject_id uuid not null references employees(id) on delete cascade,
+  reviewer_id uuid not null references employees(id) on delete cascade,
+  relation text not null check (relation in ('SELF','MANAGER','PEER','REPORT')),
+  status text not null default 'PENDING' check (status in ('PENDING','SUBMITTED','DECLINED')),
+  ratings jsonb, strengths text check (length(strengths) <= 3000), improvements text check (length(improvements) <= 3000),
+  submitted_at timestamptz,
+  unique (cycle_id, subject_id, reviewer_id),
+  check ((relation = 'SELF') = (subject_id = reviewer_id))
+);
+alter table review_cycles enable row level security;
+alter table review_assignments enable row level security;
+drop policy if exists cycles_read on review_cycles;
+create policy cycles_read on review_cycles for select to authenticated using (org_id = current_org_id() and (status <> 'DRAFT' or has_perm('reviews.manage')));
+drop policy if exists cycles_write on review_cycles;
+create policy cycles_write on review_cycles for all to authenticated
+  using (org_id = current_org_id() and has_perm('reviews.manage'))
+  with check (org_id = current_org_id() and has_perm('reviews.manage') and status = 'DRAFT');
+revoke update on review_cycles from authenticated;
+grant update (name, period_start, period_end, questions, anonymous_peers, peers_per_person, due_on) on review_cycles to authenticated;
+-- Reviewers see only their own forms. Subjects never read raw rows — they get review_summary(), which hides peers.
+drop policy if exists assignments_read on review_assignments;
+create policy assignments_read on review_assignments for select to authenticated
+  using (org_id = current_org_id() and (reviewer_id = current_employee_id() or has_perm('reviews.manage')));
+revoke insert, update, delete on review_assignments from authenticated;
+
+create or replace function review_cycle_open(p_cycle uuid) returns int
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare c review_cycles; e record; p record; n int := 0;
+begin
+  select * into c from review_cycles where id = p_cycle and org_id = current_org_id() for update;
+  if c.id is null or not has_perm('reviews.manage') then raise exception 'Only HR can open review cycles.' using errcode = '42501'; end if;
+  if c.status <> 'DRAFT' then raise exception 'This cycle is already open.'; end if;
+  for e in select id, manager_id from employees where org_id = c.org_id and status <> 'EXITED' and role <> 'SUPER_ADMIN' loop
+    insert into review_assignments(org_id, cycle_id, subject_id, reviewer_id, relation) values (c.org_id, c.id, e.id, e.id, 'SELF') on conflict do nothing;
+    if e.manager_id is not null then
+      insert into review_assignments(org_id, cycle_id, subject_id, reviewer_id, relation) values (c.org_id, c.id, e.id, e.manager_id, 'MANAGER') on conflict do nothing;
+    end if;
+    insert into review_assignments(org_id, cycle_id, subject_id, reviewer_id, relation)
+      select c.org_id, c.id, e.id, r.id, 'REPORT' from employees r where r.manager_id = e.id and r.status <> 'EXITED' on conflict do nothing;
+    for p in select distinct m2.employee_id as id from org_team_members m1 join org_team_members m2 on m2.team_id = m1.team_id
+               join employees pe on pe.id = m2.employee_id and pe.status <> 'EXITED'
+              where m1.employee_id = e.id and m2.employee_id <> e.id
+                and m2.employee_id is distinct from e.manager_id
+                and not exists (select 1 from employees r where r.id = m2.employee_id and r.manager_id = e.id)
+              order by 1 limit c.peers_per_person loop
+      insert into review_assignments(org_id, cycle_id, subject_id, reviewer_id, relation) values (c.org_id, c.id, e.id, p.id, 'PEER') on conflict do nothing;
+    end loop;
+  end loop;
+  update review_cycles set status = 'OPEN' where id = c.id;
+  for e in select reviewer_id, count(*) as k from review_assignments where cycle_id = c.id group by reviewer_id loop
+    perform notify(c.org_id, e.reviewer_id, 'PERFORMANCE', '360° review open · ' || c.name,
+      e.k || ' form' || case when e.k > 1 then 's' else '' end || ' to fill' || coalesce(' by ' || to_char(c.due_on, 'DD Mon'), ''),
+      '/performance/reviews', 'rev-open-' || c.id);
+    n := n + e.k;
+  end loop;
+  perform log_audit('reviews.cycle_opened', 'review_cycle', c.id::text, jsonb_build_object('forms', n));
+  return n;
+end $$;
+
+create or replace function review_cycle_close(p_cycle uuid) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if not has_perm('reviews.manage') then raise exception 'Only HR can close review cycles.' using errcode = '42501'; end if;
+  update review_cycles set status = 'CLOSED' where id = p_cycle and org_id = current_org_id() and status = 'OPEN';
+  if not found then raise exception 'Only open cycles can be closed.'; end if;
+  perform log_audit('reviews.cycle_closed', 'review_cycle', p_cycle::text, '{}');
+end $$;
+
+create or replace function review_submit(p_assignment uuid, p_ratings jsonb, p_strengths text, p_improvements text) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare a review_assignments; c review_cycles; q jsonb; v numeric;
+begin
+  select * into a from review_assignments where id = p_assignment and reviewer_id = current_employee_id() for update;
+  if a.id is null then raise exception 'This review form is not yours.' using errcode = '42501'; end if;
+  select * into c from review_cycles where id = a.cycle_id;
+  if c.status <> 'OPEN' then raise exception 'This review cycle is closed.'; end if;
+  if jsonb_typeof(p_ratings) <> 'object' then raise exception 'Ratings missing.'; end if;
+  for q in select * from jsonb_array_elements(c.questions) loop
+    v := (p_ratings ->> (q ->> 'key'))::numeric;
+    if v is null or v < 1 or v > 5 or v <> trunc(v) then raise exception 'Rate "%" from 1 to 5.', q ->> 'label'; end if;
+  end loop;
+  if length(trim(coalesce(p_strengths, ''))) < 3 then raise exception 'Write at least one strength.'; end if;
+  update review_assignments set ratings = (select jsonb_object_agg(q2 ->> 'key', (p_ratings ->> (q2 ->> 'key'))::int) from jsonb_array_elements(c.questions) q2),
+         strengths = trim(p_strengths), improvements = nullif(trim(p_improvements), ''), status = 'SUBMITTED', submitted_at = now()
+   where id = a.id;
+end $$;
+
+-- Summary for one person. The subject sees it only after the cycle closes; peers and reports are anonymous
+-- (and their comments are shown only when at least 2 such reviewers responded). Managers in the reporting line
+-- and HR can see it any time; HR (reviews.manage) also sees who wrote what.
+create or replace function review_summary(p_cycle uuid, p_subject uuid) returns jsonb
+language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare c review_cycles; v_hr boolean := has_perm('reviews.manage'); v_anon_n int; v_out jsonb;
+begin
+  select * into c from review_cycles where id = p_cycle and org_id = current_org_id();
+  if c.id is null then return null; end if;
+  if not (v_hr or is_in_my_team(p_subject) or (p_subject = current_employee_id() and c.status = 'CLOSED')) then
+    raise exception 'You can''t see this review yet.' using errcode = '42501';
+  end if;
+  select count(*) into v_anon_n from review_assignments where cycle_id = c.id and subject_id = p_subject
+     and relation in ('PEER','REPORT') and status = 'SUBMITTED';
+  select jsonb_build_object(
+    'cycle', c.name, 'status', c.status, 'questions', c.questions,
+    'by_relation', coalesce((select jsonb_object_agg(rel, avgs) from (
+        select relation as rel, jsonb_object_agg(k, round(av, 2)) as avgs from (
+          select a.relation, r.key as k, avg(r.value::numeric) as av
+            from review_assignments a, jsonb_each_text(a.ratings) r
+           where a.cycle_id = c.id and a.subject_id = p_subject and a.status = 'SUBMITTED'
+             and (a.relation not in ('PEER','REPORT') or v_anon_n >= 2 or v_hr)
+           group by a.relation, r.key) s group by relation) t), '{}'),
+    'responses', (select count(*) from review_assignments where cycle_id = c.id and subject_id = p_subject and status = 'SUBMITTED'),
+    'expected', (select count(*) from review_assignments where cycle_id = c.id and subject_id = p_subject),
+    'comments', coalesce((select jsonb_agg(jsonb_build_object('relation', a.relation, 'strengths', a.strengths, 'improvements', a.improvements,
+                  'by', case when v_hr or not c.anonymous_peers or a.relation in ('SELF','MANAGER')
+                             then (select full_name from employees where id = a.reviewer_id) end)
+                  order by a.relation, md5(a.id::text))
+                  from review_assignments a where a.cycle_id = c.id and a.subject_id = p_subject and a.status = 'SUBMITTED'
+                   and (a.relation not in ('PEER','REPORT') or v_anon_n >= 2 or v_hr)), '[]')
+  ) into v_out;
+  return v_out;
+end $$;
+grant execute on function review_cycle_open(uuid), review_cycle_close(uuid), review_submit(uuid, jsonb, text, text), review_summary(uuid, uuid) to authenticated;
+
+-- ---------- Training records ----------
+create table if not exists training_records (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  title text not null check (length(trim(title)) between 3 and 160),
+  provider text check (length(provider) <= 120),
+  kind text not null default 'COURSE' check (kind in ('COURSE','WORKSHOP','CERTIFICATION','INTERNAL','ON_THE_JOB')),
+  status text not null default 'PLANNED' check (status in ('PLANNED','IN_PROGRESS','COMPLETED','DROPPED')),
+  started_on date, completed_on date,
+  hours numeric(6,1) check (hours between 0 and 2000),
+  certificate_url text check (certificate_url is null or certificate_url ~ '^https://'),
+  notes text check (length(notes) <= 1000),
+  assigned_by uuid references employees(id),
+  verified_by uuid references employees(id), verified_at timestamptz,
+  created_by uuid not null references employees(id),
+  created_at timestamptz not null default now(),
+  check (completed_on is null or started_on is null or completed_on >= started_on),
+  check (status <> 'COMPLETED' or completed_on is not null),
+  check (verified_by is null or verified_by <> employee_id)
+);
+alter table training_records enable row level security;
+drop policy if exists training_read on training_records;
+create policy training_read on training_records for select to authenticated using (org_id = current_org_id() and (
+  employee_id = current_employee_id() or is_in_my_team(employee_id) or has_perm('training.manage') or has_perm('performance.view_all')));
+drop policy if exists training_insert on training_records;
+create policy training_insert on training_records for insert to authenticated with check (org_id = current_org_id()
+  and created_by = current_employee_id() and verified_by is null and verified_at is null
+  and (employee_id = current_employee_id() or is_in_my_team(employee_id) or has_perm('training.manage')));
+drop policy if exists training_update on training_records;
+create policy training_update on training_records for update to authenticated
+  using (org_id = current_org_id() and verified_at is null
+         and (employee_id = current_employee_id() or is_in_my_team(employee_id) or has_perm('training.manage')))
+  with check (org_id = current_org_id());
+revoke update on training_records from authenticated;
+grant update (title, provider, kind, status, started_on, completed_on, hours, certificate_url, notes) on training_records to authenticated;
+
+create or replace function training_verify(p_id uuid) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare t training_records;
+begin
+  select * into t from training_records where id = p_id and org_id = current_org_id() for update;
+  if t.id is null then raise exception 'Unknown training record.' using errcode = '42501'; end if;
+  if t.employee_id = current_employee_id() then raise exception 'You can''t verify your own training.' using errcode = '42501'; end if;
+  if not (is_in_my_team(t.employee_id) or has_perm('training.manage')) then raise exception 'Only their manager or HR can verify.' using errcode = '42501'; end if;
+  if t.status <> 'COMPLETED' then raise exception 'Only completed training can be verified.'; end if;
+  update training_records set verified_by = current_employee_id(), verified_at = now() where id = p_id;
+end $$;
+grant execute on function training_verify(uuid) to authenticated;
+
+create or replace function notify_training_assigned() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if new.employee_id <> new.created_by then
+    update training_records set assigned_by = new.created_by where id = new.id;
+    perform notify(new.org_id, new.employee_id, 'TRAINING', 'Training assigned · ' || left(new.title, 90),
+      coalesce(new.provider, 'Internal'), '/performance/training', 'training-' || new.id);
+  end if;
+  return new;
+end $$;
+drop trigger if exists training_records_assigned on training_records;
+create trigger training_records_assigned after insert on training_records for each row execute function notify_training_assigned();
+
+-- ---------- Permissions & seeds ----------
+create or replace function seed_growth(p_org uuid) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare d record; k text; v_src text; v_unit text; v_dir text;
+begin
+  insert into role_permissions(org_id, role, permission)
+  select p_org, r.role::app_role, r.perm from (values
+    ('ADMIN','okr.manage'),('ADMIN','kpi.manage'),('ADMIN','reviews.manage'),('ADMIN','training.manage'),
+    ('OPERATIONS_MANAGER','okr.manage'),('OPERATIONS_MANAGER','kpi.manage'),
+    ('HR_MANAGER','reviews.manage'),('HR_MANAGER','training.manage'),('HR_MANAGER','kpi.manage')) r(role, perm)
+  on conflict do nothing;
+  -- KPIs from each post's KPI list; known ones are calculated automatically from the app's own records.
+  for d in select id, kpis from designations where org_id = p_org and is_active loop
+    foreach k in array d.kpis loop
+      v_src := case lower(k)
+        when 'tasks closed on time' then 'TASKS_ON_TIME_PCT' when 'on-time delivery' then 'TASKS_ON_TIME_PCT'
+        when 'delivery on time' then 'TASKS_ON_TIME_PCT' when 'report on time' then 'TASKS_ON_TIME_PCT'
+        when 'tickets closed' then 'TASKS_COMPLETED' when 'release on time' then 'TASKS_ON_TIME_PCT'
+        when 'leads contacted' then 'LEADS_CONTACTED' when 'conversions' then 'LEADS_WON'
+        when 'admissions' then 'SCHOLAR_ADMISSIONS' when 'overdue tasks' then 'MANUAL'
+        else 'MANUAL' end;
+      v_unit := case when v_src = 'TASKS_ON_TIME_PCT' or k ilike '%rate%' or k ilike '%compliance%' then '%' end;
+      v_dir := case when k ilike 'revisions%' or k ilike '%incidents%' or k ilike '%breaches%' or k ilike 'overdue%'
+                      or k ilike 'time to%' or k ilike '%follow-up time%' then 'LOWER' else 'HIGHER' end;
+      insert into kpi_definitions(org_id, designation_id, name, unit, direction, source)
+      values (p_org, d.id, k, v_unit, v_dir, v_src) on conflict do nothing;
+    end loop;
+  end loop;
+  -- Everyone: attendance days and daily updates.
+  insert into kpi_definitions(org_id, designation_id, name, unit, source) values
+    (p_org, null, 'Days present', 'days', 'ATTENDANCE_DAYS'), (p_org, null, 'Daily updates submitted', 'updates', 'DAILY_UPDATES')
+  on conflict do nothing;
+end $$;
+revoke all on function seed_growth(uuid) from public, anon, authenticated;
+do $$ declare o record; begin for o in select id from organizations loop perform seed_growth(o.id); end loop; end $$;
+
+create or replace function seed_growth_on_sa() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if new.role = 'SUPER_ADMIN' then perform seed_growth(new.org_id); end if;
+  return new;
+end $$;
+-- "employees_seed_t…" sorts after "employees_seed_scholars", so posts exist before their KPIs are copied.
+drop trigger if exists employees_seed_training_growth on employees;
+create trigger employees_seed_training_growth after insert on employees for each row execute function seed_growth_on_sa();
+
+-- People in the signed-in person's reporting line (for pickers; RLS still decides what data is visible).
+create or replace function my_team_ids() returns uuid[]
+language sql stable security definer set search_path = public, pg_temp as $$
+  select coalesce(array_agg(e.id), '{}') from employees e
+   where e.org_id = current_org_id() and e.status <> 'EXITED' and e.id <> current_employee_id() and is_in_my_team(e.id)
+$$;
+revoke all on function my_team_ids() from public, anon;
+grant execute on function my_team_ids() to authenticated;
+
+-- >>> 0033_block26_ai_assistant.sql
+-- =============================================================================
+-- 0033 · Block 26 — AI assistant (Claude API). Settings + budget caps + usage metering.
+-- Prompts and answers are NOT stored; only token counts per request. The assistant reads data through the
+-- signed-in user's own session, so it can never see more than that person can already see.
+-- =============================================================================
+create table if not exists ai_settings (
+  org_id uuid primary key references organizations(id) on delete cascade,
+  enabled boolean not null default false,
+  model text not null default 'claude-sonnet-5-5' check (model ~ '^claude-[a-z0-9.-]{3,60}$'),
+  monthly_token_budget int not null default 3000000 check (monthly_token_budget between 10000 and 500000000),
+  per_user_daily_requests int not null default 40 check (per_user_daily_requests between 1 and 1000),
+  default_language text not null default 'HINGLISH' check (default_language in ('HINGLISH','ENGLISH','HINDI')),
+  updated_at timestamptz not null default now()
+);
+insert into ai_settings(org_id) select id from organizations on conflict do nothing;
+alter table ai_settings enable row level security;
+drop policy if exists ai_settings_read on ai_settings;
+create policy ai_settings_read on ai_settings for select to authenticated using (org_id = current_org_id());
+drop policy if exists ai_settings_write on ai_settings;
+create policy ai_settings_write on ai_settings for update to authenticated
+  using (org_id = current_org_id() and has_perm('settings.manage')) with check (org_id = current_org_id() and has_perm('settings.manage'));
+revoke insert, delete on ai_settings from authenticated;
+
+create table if not exists ai_usage (
+  id bigint generated always as identity primary key,
+  org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  feature text not null check (feature in ('ASK','DAILY_SUMMARY','CLIENT_REPORT','DRAFT')),
+  model text not null,
+  input_tokens int not null default 0 check (input_tokens >= 0),
+  output_tokens int not null default 0 check (output_tokens >= 0),
+  tool_calls int not null default 0,
+  ok boolean not null default true,
+  created_at timestamptz not null default now()
+);
+create index if not exists ai_usage_org_time on ai_usage(org_id, created_at);
+alter table ai_usage enable row level security;
+drop policy if exists ai_usage_read on ai_usage;
+create policy ai_usage_read on ai_usage for select to authenticated
+  using (org_id = current_org_id() and (employee_id = current_employee_id() or has_perm('settings.manage')));
+revoke insert, update, delete on ai_usage from authenticated;
+
+-- Can the signed-in employee make one more AI request right now?
+create or replace function ai_quota() returns jsonb
+language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare s ai_settings; v_emp uuid := current_employee_id(); v_month bigint; v_today int; v_reason text;
+begin
+  if v_emp is null then raise exception 'Not signed in.' using errcode = '42501'; end if;
+  select * into s from ai_settings where org_id = current_org_id();
+  select coalesce(sum(input_tokens + output_tokens), 0) into v_month from ai_usage
+   where org_id = current_org_id() and created_at >= date_trunc('month', now() at time zone 'Asia/Kolkata') at time zone 'Asia/Kolkata';
+  select count(*) into v_today from ai_usage where employee_id = v_emp
+   and created_at >= date_trunc('day', now() at time zone 'Asia/Kolkata') at time zone 'Asia/Kolkata';
+  v_reason := case
+    when s.org_id is null or not s.enabled then 'The AI assistant is switched off. An admin can turn it on in Settings → AI assistant.'
+    when not has_perm('ai.use') then 'Your role doesn''t include the AI assistant.'
+    when v_month >= s.monthly_token_budget then 'This month''s AI budget is used up. An admin can raise it in Settings → AI assistant.'
+    when v_today >= s.per_user_daily_requests then 'You''ve reached today''s AI request limit. It resets at midnight.'
+  end;
+  return jsonb_build_object('allowed', v_reason is null, 'reason', v_reason, 'model', s.model, 'language', s.default_language,
+    'month_tokens', v_month, 'month_budget', s.monthly_token_budget, 'today', v_today, 'daily_limit', s.per_user_daily_requests);
+end $$;
+
+create or replace function ai_record_usage(p_feature text, p_model text, p_in int, p_out int, p_tools int, p_ok boolean) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if current_employee_id() is null then raise exception 'Not signed in.' using errcode = '42501'; end if;
+  insert into ai_usage(org_id, employee_id, feature, model, input_tokens, output_tokens, tool_calls, ok)
+  values (current_org_id(), current_employee_id(), p_feature, left(p_model, 80), greatest(0, coalesce(p_in, 0)),
+          greatest(0, coalesce(p_out, 0)), greatest(0, coalesce(p_tools, 0)), coalesce(p_ok, true));
+end $$;
+revoke all on function ai_quota(), ai_record_usage(text, text, int, int, int, boolean) from public, anon;
+grant execute on function ai_quota(), ai_record_usage(text, text, int, int, int, boolean) to authenticated;
+
+-- Everyone may use it once an admin switches it on (it only sees what they can see). Interns excluded by default.
+insert into role_permissions(org_id, role, permission)
+select o.id, r.role::app_role, 'ai.use' from organizations o
+cross join (values ('ADMIN'),('HR_MANAGER'),('OPERATIONS_MANAGER'),('DEPARTMENT_MANAGER'),('TEAM_LEAD'),('SALES_EXECUTIVE'),
+                   ('PROJECT_MANAGER'),('EMPLOYEE')) r(role)
+on conflict do nothing;
+
+create or replace function seed_ai_on_sa() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if new.role = 'SUPER_ADMIN' then
+    insert into ai_settings(org_id) values (new.org_id) on conflict do nothing;
+    insert into role_permissions(org_id, role, permission)
+    select new.org_id, r.role::app_role, 'ai.use' from (values ('ADMIN'),('HR_MANAGER'),('OPERATIONS_MANAGER'),('DEPARTMENT_MANAGER'),
+      ('TEAM_LEAD'),('SALES_EXECUTIVE'),('PROJECT_MANAGER'),('EMPLOYEE')) r(role) on conflict do nothing;
+  end if;
+  return new;
+end $$;
+drop trigger if exists employees_seed_u_ai on employees;
+create trigger employees_seed_u_ai after insert on employees for each row execute function seed_ai_on_sa();
+
+-- >>> 0034_block27_reports.sql
+-- =============================================================================
+-- 0034 · Block 27 — Reports & BI: report catalogue with one permission per report, on-demand and scheduled runs
+-- (daily / weekly / monthly in IST), files kept in a private bucket, recipients told by in-app notification and an
+-- email that carries ONLY a link (never figures), and a monthly accountant pack.
+-- =============================================================================
+
+-- Client GST details for the accountant's sales register.
+alter table clients add column if not exists gstin text check (gstin is null or gstin ~ '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$');
+alter table clients add column if not exists state_code text check (state_code is null or state_code ~ '^[0-9]{2}$');
+
+-- Same rules as has_perm(), for an arbitrary employee (used to re-check recipients at delivery time). Keep in sync.
+create or replace function employee_has_perm(p_emp uuid, p text) returns boolean
+language sql stable security definer set search_path = public, pg_temp as $$
+  select coalesce((
+    select case
+      when e.role = 'SUPER_ADMIN' then true
+      when exists (select 1 from employee_permission_overrides o where o.employee_id = e.id and o.permission = p
+                   and o.effect = 'DENY' and (o.expires_at is null or o.expires_at > now())) then false
+      when exists (select 1 from employee_permission_overrides o where o.employee_id = e.id and o.permission = p
+                   and o.effect = 'GRANT' and (o.expires_at is null or o.expires_at > now())) then true
+      when exists (select 1 from role_permissions rp where rp.org_id = e.org_id and rp.role = e.role and rp.permission = p) then true
+      else not is_sensitive_permission(p) and exists (
+        select 1 from designations d where d.org_id = e.org_id and d.is_active and e.designation is not null
+          and lower(d.title) = lower(e.designation) and p = any(d.grants))
+    end
+    from employees e where e.id = p_emp and e.status <> 'EXITED'), false)
+$$;
+revoke all on function employee_has_perm(uuid, text) from public, anon, authenticated;
+
+create or replace function report_types() returns text[] language sql immutable as $$
+  select array['ATTENDANCE_SUMMARY','TASK_DELIVERY','CRM_FUNNEL','PNL_MONTHLY','SCHOLARS_ADMISSIONS','KPI_SUMMARY']
+$$;
+-- The permission a person needs to see each report (and to receive it).
+create or replace function report_type_perm(p_type text) returns text language sql immutable as $$
+  select case p_type
+    when 'ATTENDANCE_SUMMARY' then 'attendance.manage' when 'TASK_DELIVERY' then 'reports.view_org'
+    when 'CRM_FUNNEL' then 'crm.view_all' when 'PNL_MONTHLY' then 'finance.view'
+    when 'SCHOLARS_ADMISSIONS' then 'scholars.view' when 'KPI_SUMMARY' then 'performance.view_all' end
+$$;
+grant execute on function report_types(), report_type_perm(text) to authenticated;
+
+create table if not exists report_schedules (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  name text not null check (length(trim(name)) between 3 and 120),
+  report_type text not null check (report_type = any (report_types())),
+  format text not null default 'XLSX' check (format in ('XLSX','PDF','CSV')),
+  frequency text not null check (frequency in ('DAILY','WEEKLY','MONTHLY')),
+  weekday int check (weekday between 1 and 7),        -- ISO: 1 = Monday
+  month_day int check (month_day between 1 and 28),
+  hour_local int not null default 9 check (hour_local between 0 and 23),
+  recipients uuid[] not null default '{}' check (cardinality(recipients) between 1 and 30),
+  active boolean not null default true,
+  next_run_at timestamptz,
+  last_run_at timestamptz,
+  created_by uuid not null references employees(id),
+  created_at timestamptz not null default now(),
+  check (frequency <> 'WEEKLY' or weekday is not null),
+  check (frequency <> 'MONTHLY' or month_day is not null)
+);
+create table if not exists report_runs (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  schedule_id uuid references report_schedules(id) on delete set null,
+  report_type text not null check (report_type = any (report_types())),
+  format text not null check (format in ('XLSX','PDF','CSV')),
+  period_start date not null, period_end date not null,
+  status text not null default 'QUEUED' check (status in ('QUEUED','RUNNING','READY','FAILED')),
+  file_path text, row_count int, error text,
+  requested_by uuid references employees(id) on delete set null,
+  attempts int not null default 0,
+  created_at timestamptz not null default now(), finished_at timestamptz,
+  check (period_end >= period_start)
+);
+create index if not exists report_runs_queue on report_runs(status, created_at) where status in ('QUEUED','RUNNING');
+
+-- Next run time for a schedule (all schedules are in the organisation's local time, IST by default).
+create or replace function report_next_run(p_freq text, p_weekday int, p_month_day int, p_hour int, p_tz text, p_after timestamptz)
+returns timestamptz language plpgsql stable as $$
+declare v_local timestamp := (p_after at time zone p_tz); v_day date := v_local::date; v_try timestamp; i int;
+begin
+  for i in 0..62 loop
+    v_try := (v_day + i) + make_interval(hours => p_hour);
+    if v_try <= v_local then continue; end if;
+    if p_freq = 'DAILY'
+       or (p_freq = 'WEEKLY' and extract(isodow from v_try) = p_weekday)
+       or (p_freq = 'MONTHLY' and extract(day from v_try) = p_month_day) then
+      return v_try at time zone p_tz;
+    end if;
+  end loop;
+  return null;
+end $$;
+
+-- The period a scheduled run covers: yesterday (daily), last Mon–Sun (weekly), last calendar month (monthly).
+create or replace function report_period(p_freq text, p_at timestamptz, p_tz text, out p_start date, out p_end date)
+language plpgsql stable as $$
+declare d date := (p_at at time zone p_tz)::date;
+begin
+  if p_freq = 'DAILY' then p_start := d - 1; p_end := d - 1;
+  elsif p_freq = 'WEEKLY' then p_end := d - extract(isodow from d)::int; p_start := p_end - 6;
+  else p_start := (date_trunc('month', d) - interval '1 month')::date; p_end := (date_trunc('month', d) - interval '1 day')::date;
+  end if;
+end $$;
+
+create or replace function report_schedule_defaults() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare v_tz text; r uuid;
+begin
+  -- The creator must be allowed to see this report; recipients must belong to the same organisation.
+  if auth.uid() is not null and not has_perm(report_type_perm(new.report_type)) then
+    raise exception 'You don''t have access to this report, so you can''t schedule it.' using errcode = '42501';
+  end if;
+  foreach r in array new.recipients loop
+    if not exists (select 1 from employees where id = r and org_id = new.org_id and status <> 'EXITED') then
+      raise exception 'Unknown recipient.';
+    end if;
+  end loop;
+  select timezone into v_tz from organizations where id = new.org_id;
+  if tg_op = 'INSERT' or new.frequency is distinct from old.frequency or new.weekday is distinct from old.weekday
+     or new.month_day is distinct from old.month_day or new.hour_local is distinct from old.hour_local
+     or (new.active and not old.active) then
+    new.next_run_at := report_next_run(new.frequency, new.weekday, new.month_day, new.hour_local, coalesce(v_tz, 'Asia/Kolkata'), now());
+  end if;
+  return new;
+end $$;
+drop trigger if exists report_schedules_defaults on report_schedules;
+create trigger report_schedules_defaults before insert or update on report_schedules for each row execute function report_schedule_defaults();
+
+alter table report_schedules enable row level security;
+alter table report_runs enable row level security;
+drop policy if exists schedules_read on report_schedules;
+create policy schedules_read on report_schedules for select to authenticated
+  using (org_id = current_org_id() and (has_perm('reports.schedule') or current_employee_id() = any(recipients)));
+drop policy if exists schedules_write on report_schedules;
+create policy schedules_write on report_schedules for all to authenticated
+  using (org_id = current_org_id() and has_perm('reports.schedule') and has_perm(report_type_perm(report_type)))
+  with check (org_id = current_org_id() and has_perm('reports.schedule') and has_perm(report_type_perm(report_type)));
+revoke update on report_schedules from authenticated;
+grant update (name, format, frequency, weekday, month_day, hour_local, recipients, active) on report_schedules to authenticated;
+-- A report file is readable by anyone who holds that report's permission.
+drop policy if exists runs_read on report_runs;
+create policy runs_read on report_runs for select to authenticated
+  using (org_id = current_org_id() and has_perm(report_type_perm(report_type)));
+revoke insert, update, delete on report_runs from authenticated;
+
+-- On-demand run from the app.
+create or replace function report_request(p_type text, p_format text, p_start date, p_end date) returns uuid
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare v_id uuid;
+begin
+  if not has_perm(report_type_perm(p_type)) then raise exception 'You don''t have access to this report.' using errcode = '42501'; end if;
+  if p_end < p_start or p_end - p_start > 400 then raise exception 'Pick a period of up to about 13 months.'; end if;
+  if not hit_rate_limit('report-req:' || current_employee_id(), 30, 3600) then raise exception 'Too many reports in an hour.'; end if;
+  insert into report_runs(org_id, report_type, format, period_start, period_end, requested_by)
+  values (current_org_id(), p_type, coalesce(p_format, 'XLSX'), p_start, p_end, current_employee_id()) returning id into v_id;
+  return v_id;
+end $$;
+grant execute on function report_request(text, text, date, date) to authenticated;
+
+-- Scheduler (service role): queue due schedules and move their next run forward.
+create or replace function claim_due_reports(p_limit int default 10) returns int
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare s record; v_tz text; per record; n int := 0;
+begin
+  for s in select * from report_schedules where active and next_run_at is not null and next_run_at <= now()
+            order by next_run_at limit p_limit for update skip locked loop
+    select timezone into v_tz from organizations where id = s.org_id;
+    select * into per from report_period(s.frequency, s.next_run_at, coalesce(v_tz, 'Asia/Kolkata'));
+    insert into report_runs(org_id, schedule_id, report_type, format, period_start, period_end)
+    values (s.org_id, s.id, s.report_type, s.format, per.p_start, per.p_end);
+    update report_schedules set last_run_at = now(),
+      next_run_at = report_next_run(s.frequency, s.weekday, s.month_day, s.hour_local, coalesce(v_tz, 'Asia/Kolkata'), now())
+     where id = s.id;
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
+create or replace function claim_report_runs(p_limit int default 5) returns setof report_runs
+language sql security definer set search_path = public, pg_temp as $$
+  update report_runs set status = 'RUNNING', attempts = attempts + 1
+   where id in (select id from report_runs
+                 where (status = 'QUEUED' or (status = 'RUNNING' and created_at < now() - interval '15 minutes' and attempts < 3))
+                 order by created_at limit p_limit for update skip locked)
+  returning *
+$$;
+-- Tell recipients the file is ready: in-app + an email with a link only. Recipients who lost the permission are skipped.
+create or replace function report_run_finished(p_run uuid, p_ok boolean, p_path text, p_rows int, p_error text) returns int
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare r report_runs; s report_schedules; v_emp record; n int := 0; v_label text;
+begin
+  update report_runs set status = case when p_ok then 'READY' else 'FAILED' end, file_path = p_path, row_count = p_rows,
+         error = left(p_error, 500), finished_at = now() where id = p_run returning * into r;
+  if r.id is null or not p_ok then return 0; end if;
+  v_label := initcap(replace(r.report_type, '_', ' ')) || ' · ' || to_char(r.period_start, 'DD Mon') ||
+             case when r.period_end <> r.period_start then ' – ' || to_char(r.period_end, 'DD Mon YYYY') else to_char(r.period_start, ' YYYY') end;
+  if r.schedule_id is not null then
+    select * into s from report_schedules where id = r.schedule_id;
+    for v_emp in select e.id, e.full_name, e.official_email from employees e
+                  where e.id = any(s.recipients) and e.status <> 'EXITED' and employee_has_perm(e.id, report_type_perm(r.report_type)) loop
+      perform notify(r.org_id, v_emp.id, 'SYSTEM', 'Report ready · ' || s.name, v_label, '/reports?run=' || r.id, 'report-' || r.id);
+      perform enqueue_email(r.org_id, v_emp.official_email, v_emp.id, 'report.ready',
+        jsonb_build_object('name', split_part(v_emp.full_name, ' ', 1), 'report', s.name, 'period', v_label, 'run_id', r.id),
+        'report-' || r.id || '-' || v_emp.id);
+      n := n + 1;
+    end loop;
+  elsif r.requested_by is not null then
+    perform notify(r.org_id, r.requested_by, 'SYSTEM', 'Report ready', v_label, '/reports?run=' || r.id, 'report-' || r.id);
+  end if;
+  return n;
+end $$;
+revoke all on function claim_due_reports(int), claim_report_runs(int), report_run_finished(uuid, boolean, text, int, text) from public, anon, authenticated;
+
+-- ---------- Report data ----------
+-- Returns {"title", "columns": [...], "rows": [[...]], "notes": [...]}. Aggregates only; never per-person salaries.
+-- Callable by the service role (scheduler) or by a signed-in person who holds the report's permission.
+create or replace function report_data(p_org uuid, p_type text, p_start date, p_end date) returns jsonb
+language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare tz text; v jsonb; v_notes jsonb := '[]';
+begin
+  if auth.uid() is not null and not (p_org = current_org_id() and has_perm(report_type_perm(p_type))) then
+    raise exception 'You don''t have access to this report.' using errcode = '42501';
+  end if;
+  select timezone into tz from organizations where id = p_org;
+  tz := coalesce(tz, 'Asia/Kolkata');
+  if p_type = 'ATTENDANCE_SUMMARY' then
+    with ev as (
+      select a.employee_id, a.event_type, a.occurred_at, (a.occurred_at at time zone tz)::date as d,
+             lead(a.event_type) over w as next_type, lead(a.occurred_at) over w as next_at
+        from attendance_events a where a.org_id = p_org and (a.occurred_at at time zone tz)::date between p_start and p_end
+      window w as (partition by a.employee_id, (a.occurred_at at time zone tz)::date order by a.occurred_at)),
+    agg as (
+      select employee_id, count(distinct d) filter (where event_type = 'CLOCK_IN') as days,
+             round(sum(extract(epoch from (next_at - occurred_at)) / 3600) filter (where event_type in ('CLOCK_IN','BREAK_END') and next_type in ('CLOCK_OUT','BREAK_START'))::numeric, 1) as hours,
+             count(distinct d) filter (where event_type = 'CLOCK_IN' and not exists (select 1 from ev e2 where e2.employee_id = ev.employee_id and e2.d = ev.d and e2.event_type = 'CLOCK_OUT')) as no_clockout
+        from ev group by employee_id)
+    select jsonb_build_object('title', 'Attendance summary',
+      'columns', jsonb_build_array('Employee ID','Name','Department','Days present','Hours worked','Days without clock-out','Leave days (approved)','Corrections pending'),
+      'rows', coalesce(jsonb_agg(jsonb_build_array(e.employee_code, e.full_name, dp.name, coalesce(a.days, 0), coalesce(a.hours, 0), coalesce(a.no_clockout, 0),
+          (select coalesce(sum(case when l.half_day then 0.5 else (least(l.end_date, p_end) - greatest(l.start_date, p_start) + 1) end), 0)
+             from leave_requests l where l.employee_id = e.id and l.status = 'APPROVED' and l.start_date <= p_end and l.end_date >= p_start),
+          (select count(*) from attendance_corrections c where c.employee_id = e.id and c.status = 'PENDING'))
+          order by dp.name nulls last, e.full_name), '[]'))
+      into v
+      from employees e left join departments dp on dp.id = e.department_id left join agg a on a.employee_id = e.id
+     where e.org_id = p_org and e.status <> 'EXITED';
+  elsif p_type = 'TASK_DELIVERY' then
+    select jsonb_build_object('title', 'Task delivery',
+      'columns', jsonb_build_array('Employee ID','Name','Post','Completed','On time %','Avg quality','Reopened','Open & overdue'),
+      'rows', coalesce(jsonb_agg(jsonb_build_array(e.employee_code, e.full_name, e.designation,
+          (select count(*) from tasks t where t.assignee_id = e.id and t.status = 'COMPLETED' and (t.completed_at at time zone tz)::date between p_start and p_end),
+          (select round(100.0 * count(*) filter (where t.deadline is null or t.completed_at <= t.deadline) / nullif(count(*), 0), 1)
+             from tasks t where t.assignee_id = e.id and t.status = 'COMPLETED' and (t.completed_at at time zone tz)::date between p_start and p_end),
+          (select round(avg(t.quality_score), 1) from tasks t where t.assignee_id = e.id and t.status = 'COMPLETED' and (t.completed_at at time zone tz)::date between p_start and p_end),
+          (select coalesce(sum(t.reopen_count), 0) from tasks t where t.assignee_id = e.id and (t.completed_at at time zone tz)::date between p_start and p_end),
+          (select count(*) from tasks t where t.assignee_id = e.id and t.status not in ('COMPLETED','CANCELLED') and t.deadline < now()))
+          order by e.full_name), '[]'))
+      into v from employees e where e.org_id = p_org and e.status <> 'EXITED';
+  elsif p_type = 'CRM_FUNNEL' then
+    select jsonb_build_object('title', 'CRM funnel',
+      'columns', jsonb_build_array('Source','New leads','Contacted','Qualified','Proposal','Negotiation','Won','Lost','Win rate %'),
+      'rows', coalesce(jsonb_agg(jsonb_build_array(src, n, contacted, qualified, proposal, negotiation, won, lost,
+                round(100.0 * won / nullif(won + lost, 0), 1)) order by n desc), '[]'))
+      into v from (
+        select source::text as src, count(*) as n,
+               count(*) filter (where status not in ('NEW')) as contacted,
+               count(*) filter (where status in ('QUALIFIED','PROPOSAL','NEGOTIATION','WON')) as qualified,
+               count(*) filter (where status in ('PROPOSAL','NEGOTIATION','WON')) as proposal,
+               count(*) filter (where status in ('NEGOTIATION','WON')) as negotiation,
+               count(*) filter (where status = 'WON') as won, count(*) filter (where status = 'LOST') as lost
+          from leads where org_id = p_org and duplicate_of is null and (created_at at time zone tz)::date between p_start and p_end
+         group by source) f;
+    v_notes := jsonb_build_array('Leads created in the period, by where they came from, and how far each has got (as of today). Duplicates excluded.');
+  elsif p_type = 'PNL_MONTHLY' then
+    with lines as (
+      select 1 as o, 'Income' as section, 'Invoiced (taxable value)' as item,
+             coalesce(sum(subtotal), 0) as amount from client_invoices
+        where org_id = p_org and status not in ('DRAFT','VOID') and issue_date between p_start and p_end
+      union all select 2, 'Income', 'GST on invoices (not income)', coalesce(sum(tax_amount), 0) from client_invoices
+        where org_id = p_org and status not in ('DRAFT','VOID') and issue_date between p_start and p_end
+      union all select 3, 'Cash', 'Client payments received', coalesce(sum(amount), 0) from invoice_payments
+        where org_id = p_org and paid_on between p_start and p_end
+      union all select 4, 'Income', 'VSM Scholars fees collected', coalesce(sum(amount), 0) from scholar_fee_payments
+        where org_id = p_org and status = 'PAID' and paid_on between p_start and p_end
+      union all select 10, 'Expenses', 'Expense: ' || category, sum(amount) from finance_expenses
+        where org_id = p_org and status in ('APPROVED','PAID') and expense_date between p_start and p_end group by category
+      union all select 20, 'Expenses', 'Payroll cost (gross + employer PF/ESI, approved runs, company total)',
+             coalesce(sum(pe.gross_amount + pe.employer_contribution_amount), 0)
+        from payroll_entries pe join payroll_runs pr on pr.id = pe.run_id
+       where pr.org_id = p_org and pr.status in ('APPROVED','PROCESSED','PAID') and pr.period_start >= p_start and pr.period_end <= p_end
+      union all select 30, 'Cash', 'Vendor payments made', coalesce(sum(amount), 0) from vendor_payments
+        where org_id = p_org and paid_on between p_start and p_end)
+    select jsonb_build_object('title', 'Profit & loss (management view)', 'columns', jsonb_build_array('Section','Item','Amount (Rs.)'),
+      'rows', (select coalesce(jsonb_agg(jsonb_build_array(section, item, round(amount, 2)) order by o, item), '[]') from lines)
+              || jsonb_build_array(jsonb_build_array('Result', 'Operating profit (invoiced + Scholars fees − expenses − payroll)',
+                   (select round(coalesce(sum(case when o in (1, 4) then amount when o in (10, 20) then -amount else 0 end), 0), 2) from lines))))
+      into v;
+    v_notes := jsonb_build_array('Management view on accrual for invoices and cash for fees; not a statutory P&L. Payroll is a single company total — no individual salaries.');
+  elsif p_type = 'SCHOLARS_ADMISSIONS' then
+    select jsonb_build_object('title', 'VSM Scholars admissions',
+      'columns', jsonb_build_array('Course','New enquiries','Enrolled','Conversion %','Fees collected (Rs.)','Fees outstanding (Rs.)'),
+      'rows', coalesce(jsonb_agg(jsonb_build_array(c.name, x.enq, x.enr, round(100.0 * x.enr / nullif(x.enq, 0), 1), x.paid, x.due) order by c.code), '[]'))
+      into v from scholar_courses c cross join lateral (select
+        (select count(*) from scholar_students s where s.org_id = p_org and s.interested_course_id = c.id and (s.created_at at time zone tz)::date between p_start and p_end) as enq,
+        (select count(*) from scholar_enrollments en join scholar_batches b on b.id = en.batch_id where b.course_id = c.id and (en.enrolled_at at time zone tz)::date between p_start and p_end) as enr,
+        (select coalesce(sum(f.amount), 0) from scholar_fee_payments f join scholar_enrollments en on en.id = f.enrollment_id join scholar_batches b on b.id = en.batch_id
+          where b.course_id = c.id and f.status = 'PAID' and f.paid_on between p_start and p_end) as paid,
+        (select coalesce(sum(f.amount), 0) from scholar_fee_payments f join scholar_enrollments en on en.id = f.enrollment_id join scholar_batches b on b.id = en.batch_id
+          where b.course_id = c.id and f.status = 'DUE' and f.due_on <= p_end) as due) x
+     where c.org_id = p_org;
+  elsif p_type = 'KPI_SUMMARY' then
+    select jsonb_build_object('title', 'KPI summary',
+      'columns', jsonb_build_array('Employee ID','Name','Post','KPI','Month','Value','Target','Status','Source','Verified'),
+      'rows', coalesce(jsonb_agg(jsonb_build_array(e.employee_code, e.full_name, e.designation, k.name, to_char(kv.period_month, 'Mon YYYY'), kv.value, k.target,
+          case when k.target is null then '-' when (k.direction = 'HIGHER' and kv.value >= k.target) or (k.direction = 'LOWER' and kv.value <= k.target) then 'Met' else 'Below' end,
+          kv.source, case when kv.source = 'AUTO' or kv.verified_at is not null then 'Yes' else 'No' end)
+          order by e.full_name, k.name, kv.period_month), '[]'))
+      into v from kpi_values kv join kpi_definitions k on k.id = kv.kpi_id join employees e on e.id = kv.employee_id
+     where kv.org_id = p_org and kv.period_month between date_trunc('month', p_start)::date and p_end;
+  else
+    raise exception 'Unknown report.';
+  end if;
+  return v || jsonb_build_object('notes', v_notes, 'period_start', p_start, 'period_end', p_end, 'type', p_type);
+end $$;
+revoke all on function report_data(uuid, text, date, date) from public, anon;
+grant execute on function report_data(uuid, text, date, date) to authenticated;
+
+-- ---------- Accountant pack (one month, multi-sheet) ----------
+create or replace function accountant_pack(p_org uuid, p_start date, p_end date) returns jsonb
+language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare v_payroll boolean;
+begin
+  if auth.uid() is not null and not (p_org = current_org_id() and has_perm('finance.export')) then
+    raise exception 'Only people with finance export rights can download the accountant pack.' using errcode = '42501';
+  end if;
+  v_payroll := auth.uid() is null or has_perm('payroll.export');
+  return jsonb_build_object(
+    'Sales register', jsonb_build_array(jsonb_build_array('Invoice no','Date','Client','Client GSTIN','State','Taxable value','GST','Total','Status'))
+      || coalesce((select jsonb_agg(jsonb_build_array(i.invoice_number, i.issue_date, c.name, c.gstin, c.state_code, i.subtotal, i.tax_amount, i.total_amount, i.status)
+           order by i.issue_date, i.invoice_number) from client_invoices i join clients c on c.id = i.client_id
+           where i.org_id = p_org and i.status not in ('DRAFT') and i.issue_date between p_start and p_end), '[]'),
+    'Receipts', jsonb_build_array(jsonb_build_array('Date','Invoice no','Client','Amount','Method','Reference'))
+      || coalesce((select jsonb_agg(jsonb_build_array(p.paid_on, i.invoice_number, c.name, p.amount, p.method, p.reference) order by p.paid_on)
+           from invoice_payments p join client_invoices i on i.id = p.invoice_id join clients c on c.id = i.client_id
+           where p.org_id = p_org and p.paid_on between p_start and p_end), '[]'),
+    'Expenses', jsonb_build_array(jsonb_build_array('Code','Date','Type','Category','Description','Vendor','Amount','Status','Paid on','Reference'))
+      || coalesce((select jsonb_agg(jsonb_build_array(x.expense_code, x.expense_date, x.expense_type, x.category, x.description,
+             (select name from vendors where id = x.vendor_id), x.amount, x.status, x.paid_on, x.payment_reference) order by x.expense_date)
+           from finance_expenses x where x.org_id = p_org and x.status in ('APPROVED','PAID') and x.expense_date between p_start and p_end), '[]'),
+    'Vendor payments', jsonb_build_array(jsonb_build_array('Date','Vendor','Amount','Method','Reference'))
+      || coalesce((select jsonb_agg(jsonb_build_array(vp.paid_on, v.name, vp.amount, vp.method, vp.reference) order by vp.paid_on)
+           from vendor_payments vp join vendors v on v.id = vp.vendor_id where vp.org_id = p_org and vp.paid_on between p_start and p_end), '[]'),
+    'Scholars fees', jsonb_build_array(jsonb_build_array('Receipt no','Paid on','Amount','Method','Reference'))
+      || coalesce((select jsonb_agg(jsonb_build_array(f.receipt_no, f.paid_on, f.amount, f.method, f.reference) order by f.paid_on)
+           from scholar_fee_payments f where f.org_id = p_org and f.status = 'PAID' and f.paid_on between p_start and p_end), '[]'),
+    'Payroll totals', case when v_payroll then
+         jsonb_build_array(jsonb_build_array('Run period','Status','Employees','Gross','Employee PF','Employee ESI','PT','TDS','Other deductions','Net pay','Employer PF','Employer ESI'))
+      || coalesce((select jsonb_agg(jsonb_build_array(to_char(pr.period_start, 'DD Mon') || ' - ' || to_char(pr.period_end, 'DD Mon YYYY'), pr.status, x.n, x.gross,
+             x.pf, x.esi, x.pt, x.tds, x.other, x.net, x.epf, x.eesi) order by pr.period_start)
+           from payroll_runs pr cross join lateral (select count(*) as n, sum(gross_amount) as gross,
+             sum(coalesce((statutory->>'pfEmployee')::numeric, 0)) as pf, sum(coalesce((statutory->>'esiEmployee')::numeric, 0)) as esi,
+             sum(coalesce((statutory->>'pt')::numeric, 0)) as pt, sum(coalesce((statutory->>'tds')::numeric, 0)) as tds,
+             sum(deductions_amount - employee_statutory_amount) as other, sum(net_amount) as net,
+             sum(coalesce((statutory->>'pfEmployer')::numeric, 0)) as epf, sum(coalesce((statutory->>'esiEmployer')::numeric, 0)) as eesi
+             from payroll_entries where run_id = pr.id) x
+           where pr.org_id = p_org and pr.status in ('APPROVED','PROCESSED','PAID') and pr.period_start <= p_end and pr.period_end >= p_start), '[]')
+      else jsonb_build_array(jsonb_build_array('Payroll totals need payroll export rights.')) end
+  );
+end $$;
+revoke all on function accountant_pack(uuid, date, date) from public, anon;
+grant execute on function accountant_pack(uuid, date, date) to authenticated;
+
+-- Private bucket for generated files (read only through the app's signed links).
+insert into storage.buckets(id, name, public) values ('reports', 'reports', false) on conflict (id) do nothing;
+
+insert into role_permissions(org_id, role, permission)
+select o.id, r.role::app_role, 'reports.schedule' from organizations o cross join (values ('ADMIN'),('OPERATIONS_MANAGER'),('HR_MANAGER')) r(role)
+on conflict do nothing;
+create or replace function seed_reports_on_sa() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if new.role = 'SUPER_ADMIN' then
+    insert into role_permissions(org_id, role, permission)
+    select new.org_id, r.role::app_role, 'reports.schedule' from (values ('ADMIN'),('OPERATIONS_MANAGER'),('HR_MANAGER')) r(role) on conflict do nothing;
+  end if;
+  return new;
+end $$;
+drop trigger if exists employees_seed_v_reports on employees;
+create trigger employees_seed_v_reports after insert on employees for each row execute function seed_reports_on_sa();
+
+-- >>> 0035_owners_onboarding_kyc.sql
+-- =============================================================================
+-- 0035 · Owners, who-can-add-whom, admins in every group, KYC onboarding, public profile cards.
+--  • Owners: at most 2 per organisation — the Super Admin plus one co-owner chosen by the Super Admin. Full access.
+--  • Adding people: people.manage (HR Manager / Admin) adds anyone below their level; people.onboard (HR post)
+--    adds executives, employees and interns; people.add_team (managers / team leads) adds executives, employees
+--    and interns who report to themselves. Employees can add nobody, and nobody deletes employees (exit instead).
+--  • Owners and Admins are automatically members of every group chat.
+--  • KYC: personal details form + supporting documents → HR verifies (kyc.verify). Auto chat message on joining.
+--  • employee_card(): the basic, non-sensitive profile anyone in the company may see (for chat name links).
+-- =============================================================================
+
+-- ---------- Owners ----------
+alter table employees add column if not exists is_owner boolean not null default false;
+update employees set is_owner = true where role = 'SUPER_ADMIN' and not is_owner;
+
+create or replace function guard_owners() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if new.role = 'SUPER_ADMIN' then new.is_owner := true; return new; end if;
+  if tg_op = 'UPDATE' and new.is_owner is not distinct from old.is_owner then return new; end if;
+  if tg_op = 'INSERT' and not new.is_owner then return new; end if;
+  if auth.uid() is not null and not is_super_admin() and not is_owner_session() then
+    raise exception 'Only the Super Admin can choose the co-owner.' using errcode = '42501';
+  end if;
+  if new.is_owner then
+    if new.role not in ('ADMIN') then raise exception 'A co-owner must have the Admin role.' using errcode = '23514'; end if;
+    if (select count(*) from employees where org_id = new.org_id and is_owner and status <> 'EXITED' and id <> new.id) >= 2 then
+      raise exception 'There can only be 2 owners (the Super Admin and one co-owner).' using errcode = '23514';
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists employees_guard_owners on employees;
+create trigger employees_guard_owners before insert or update of is_owner, role on employees for each row execute function guard_owners();
+
+-- has_perm: owners have every permission (same as the Super Admin). Keep employee_has_perm() in sync.
+create or replace function has_perm(p text) returns boolean
+language sql stable security definer set search_path = public, pg_temp as $$
+  select coalesce((
+    select case
+      when e.role = 'SUPER_ADMIN' or e.is_owner then true
+      when exists (select 1 from employee_permission_overrides o where o.employee_id = e.id and o.permission = p
+                   and o.effect = 'DENY' and (o.expires_at is null or o.expires_at > now())) then false
+      when exists (select 1 from employee_permission_overrides o where o.employee_id = e.id and o.permission = p
+                   and o.effect = 'GRANT' and (o.expires_at is null or o.expires_at > now())) then true
+      when exists (select 1 from role_permissions rp where rp.org_id = e.org_id and rp.role = e.role and rp.permission = p) then true
+      else not is_sensitive_permission(p) and exists (
+        select 1 from designations d where d.org_id = e.org_id and d.is_active and e.designation is not null
+          and lower(d.title) = lower(e.designation) and p = any(d.grants))
+    end
+    from employees e where e.user_id = auth.uid() and e.status <> 'EXITED' limit 1), false)
+$$;
+create or replace function employee_has_perm(p_emp uuid, p text) returns boolean
+language sql stable security definer set search_path = public, pg_temp as $$
+  select coalesce((
+    select case
+      when e.role = 'SUPER_ADMIN' or e.is_owner then true
+      when exists (select 1 from employee_permission_overrides o where o.employee_id = e.id and o.permission = p
+                   and o.effect = 'DENY' and (o.expires_at is null or o.expires_at > now())) then false
+      when exists (select 1 from employee_permission_overrides o where o.employee_id = e.id and o.permission = p
+                   and o.effect = 'GRANT' and (o.expires_at is null or o.expires_at > now())) then true
+      when exists (select 1 from role_permissions rp where rp.org_id = e.org_id and rp.role = e.role and rp.permission = p) then true
+      else not is_sensitive_permission(p) and exists (
+        select 1 from designations d where d.org_id = e.org_id and d.is_active and e.designation is not null
+          and lower(d.title) = lower(e.designation) and p = any(d.grants))
+    end
+    from employees e where e.id = p_emp and e.status <> 'EXITED'), false)
+$$;
+revoke all on function employee_has_perm(uuid, text) from public, anon, authenticated;
+
+create or replace function my_context() returns jsonb
+language sql stable security definer set search_path = public, pg_temp as $$
+  select jsonb_build_object(
+    'employee_id', e.id, 'org_id', e.org_id, 'org_name', o.name, 'timezone', o.timezone,
+    'full_name', e.full_name, 'email', e.official_email, 'designation', e.designation,
+    'role', e.role, 'role_level', role_level(e.role), 'photo_url', e.photo_url, 'is_owner', e.is_owner,
+    'employee_code', e.employee_code,
+    'permissions', case when e.role = 'SUPER_ADMIN' or e.is_owner then to_jsonb(array['*'])
+      else coalesce((select jsonb_agg(ep.permission order by ep.permission) from effective_permissions(e.id) ep), '[]'::jsonb) end
+  )
+  from employees e join organizations o on o.id = e.org_id
+  where e.user_id = auth.uid() and e.status <> 'EXITED'
+  limit 1
+$$;
+
+-- KYC data (Aadhaar/PAN/bank) is sensitive: only the Super Admin may delegate kyc.* beyond the seeded roles,
+-- and a post can never grant it.
+create or replace function is_sensitive_permission(p text) returns boolean language sql immutable as $$
+ select p like 'payroll.%' or p like 'salary.%' or p like 'finance.%' or p like 'kyc.%'
+   or p in ('roles.manage','audit.view','settings.manage','communication.moderate','communication.channel_manage',
+            'teams.manage','time.approve_all','quality.manage','calendar.manage','people.reset_password')
+$$;
+
+-- ---------- Who may add whom ----------
+create or replace function can_add_employee(p_role app_role, p_manager uuid) returns boolean
+language sql stable security definer set search_path = public, pg_temp as $$
+  select current_employee_id() is not null and (
+    (has_perm('people.manage') and can_manage_role(p_role))
+    or (p_role in ('SALES_EXECUTIVE','EMPLOYEE','INTERN') and has_perm('people.onboard'))
+    or (p_role in ('SALES_EXECUTIVE','EMPLOYEE','INTERN') and has_perm('people.add_team') and p_manager = current_employee_id()))
+$$;
+grant execute on function can_add_employee(app_role, uuid) to authenticated;
+
+drop policy if exists employees_insert on employees;
+create policy employees_insert on employees for insert to authenticated
+  with check (org_id = current_org_id() and can_add_employee(role, manager_id) and not is_owner);
+-- Nobody deletes people from the app: they are exited (records stay for payroll, audit and law).
+revoke delete on employees from authenticated;
+
+create or replace function employees_guard() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare v_me uuid := current_employee_id(); v_sa boolean := is_super_admin();
+begin
+  if auth.uid() is null then return new; end if;   -- service role / migrations
+  if tg_op = 'UPDATE' then
+    if new.org_id <> old.org_id then raise exception 'org_id is immutable' using errcode='42501'; end if;
+    if new.user_id is distinct from old.user_id and not v_sa and my_level() < 90 then
+      raise exception 'only administrators can relink accounts' using errcode='42501';
+    end if;
+    if new.role <> old.role and old.id = v_me then
+      raise exception 'you cannot change your own role' using errcode='42501';
+    end if;
+    -- Nobody edits a colleague at or above their own level (Super Admin excepted); owners only by the Super Admin.
+    if old.id <> v_me and not v_sa and (role_level(old.role) >= my_level() or old.is_owner) then
+      raise exception 'you can only manage people below your level' using errcode='42501';
+    end if;
+    if new.role <> old.role and not has_perm('roles.manage') and not has_perm('people.manage') then
+      raise exception 'people.manage required to change roles' using errcode='42501';
+    end if;
+    if new.role <> old.role and not can_manage_role(new.role) then
+      raise exception 'you can only assign roles below your own level' using errcode='42501';
+    end if;
+  else
+    if not can_add_employee(new.role, new.manager_id) then
+      raise exception 'You can''t add someone with that role. Managers add executives and interns to their own team; HR adds everyone else.' using errcode='42501';
+    end if;
+  end if;
+  return new;
+end $$;
+
+create or replace function seed_access_0035(p_org uuid) returns void
+language sql security definer set search_path = public, pg_temp as $$
+  insert into role_permissions(org_id, role, permission)
+  select p_org, r.role::app_role, r.perm from (values
+    ('ADMIN','people.onboard'),('HR_MANAGER','people.onboard'),
+    ('OPERATIONS_MANAGER','people.add_team'),('DEPARTMENT_MANAGER','people.add_team'),('TEAM_LEAD','people.add_team'),('PROJECT_MANAGER','people.add_team'),
+    ('ADMIN','kyc.verify'),('HR_MANAGER','kyc.verify')) r(role, perm)
+  on conflict do nothing
+$$;
+revoke all on function seed_access_0035(uuid) from public, anon, authenticated;
+select seed_access_0035(id) from organizations;
+create or replace function seed_access_on_sa() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if new.role = 'SUPER_ADMIN' then perform seed_access_0035(new.org_id); end if;
+  return new;
+end $$;
+drop trigger if exists employees_seed_w_access on employees;
+create trigger employees_seed_w_access after insert on employees for each row execute function seed_access_on_sa();
+-- The HR post (not the HR Manager role) can onboard executives and interns.
+update designations set grants = (select array_agg(distinct g) from unnest(grants || array['people.onboard','people.view_all']) g)
+ where lower(title) in ('hr executive','hr', 'hr generalist', 'hr associate') and not ('people.onboard' = any(grants));
+
+-- ---------- Owners & Admins are in every group ----------
+create or replace function add_leaders_to_channel() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if new.channel_type = 'DIRECT' then return new; end if;
+  insert into chat_channel_members(channel_id, employee_id, member_role)
+  select new.id, e.id, 'MODERATOR' from employees e
+   where e.org_id = new.org_id and e.status <> 'EXITED' and (e.is_owner or e.role in ('SUPER_ADMIN','ADMIN'))
+  on conflict do nothing;
+  return new;
+end $$;
+drop trigger if exists chat_channels_add_leaders on chat_channels;
+create trigger chat_channels_add_leaders after insert on chat_channels for each row execute function add_leaders_to_channel();
+-- A new owner/admin joins every existing group.
+create or replace function add_leader_to_channels() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if new.status <> 'EXITED' and (new.is_owner or new.role in ('SUPER_ADMIN','ADMIN'))
+     and (tg_op = 'INSERT' or not (old.is_owner or old.role in ('SUPER_ADMIN','ADMIN'))) then
+    insert into chat_channel_members(channel_id, employee_id, member_role)
+    select c.id, new.id, 'MODERATOR' from chat_channels c where c.org_id = new.org_id and c.channel_type <> 'DIRECT' and c.archived_at is null
+    on conflict do nothing;
+  end if;
+  return new;
+end $$;
+drop trigger if exists employees_join_all_groups on employees;
+create trigger employees_join_all_groups after insert or update of role, is_owner on employees for each row execute function add_leader_to_channels();
+insert into chat_channel_members(channel_id, employee_id, member_role)
+select c.id, e.id, 'MODERATOR' from chat_channels c join employees e on e.org_id = c.org_id
+ where c.channel_type <> 'DIRECT' and c.archived_at is null and e.status <> 'EXITED' and (e.is_owner or e.role in ('SUPER_ADMIN','ADMIN'))
+on conflict do nothing;
+
+-- ---------- Public profile card ----------
+-- What any colleague may see about anyone in the company (no salary, documents, KYC or personal contact details).
+create or replace function employee_card(p_emp uuid) returns jsonb
+language sql stable security definer set search_path = public, pg_temp as $$
+  select jsonb_build_object('id', e.id, 'full_name', e.full_name, 'employee_code', e.employee_code, 'designation', e.designation,
+    'role', e.role, 'is_owner', e.is_owner, 'photo_url', e.photo_url, 'official_email', e.official_email, 'status', e.status,
+    'work_location', e.work_location, 'joining_date', e.joining_date,
+    'department', (select name from departments where id = e.department_id),
+    'manager', (select jsonb_build_object('id', m.id, 'full_name', m.full_name) from employees m where m.id = e.manager_id),
+    'teams', coalesce((select jsonb_agg(jsonb_build_object('name', t.name, 'role', tm.member_role) order by t.name)
+                       from org_team_members tm join org_teams t on t.id = tm.team_id where tm.employee_id = e.id), '[]'))
+  from employees e where e.id = p_emp and e.org_id = current_org_id() and current_employee_id() is not null
+$$;
+revoke all on function employee_card(uuid) from public, anon;
+grant execute on function employee_card(uuid) to authenticated;
+
+-- ---------- KYC ----------
+create or replace function kyc_required_docs() returns text[] language sql immutable as $$
+  select array['PHOTO','AADHAAR','PAN','ADDRESS_PROOF','BANK_PROOF','EDUCATION']
+$$;
+
+create table if not exists kyc_profiles (
+  employee_id uuid primary key references employees(id) on delete cascade,
+  org_id uuid not null references organizations(id) on delete cascade,
+  status text not null default 'NOT_STARTED' check (status in ('NOT_STARTED','DRAFT','SUBMITTED','CHANGES_REQUESTED','VERIFIED')),
+  date_of_birth date check (date_of_birth between '1940-01-01' and current_date - interval '16 years'),
+  father_name text check (length(father_name) <= 120),
+  personal_email text check (personal_email is null or personal_email ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$'),
+  personal_phone text check (personal_phone is null or personal_phone ~ '^\+?[0-9]{10,13}$'),
+  current_address text check (length(current_address) <= 400),
+  permanent_address text check (length(permanent_address) <= 400),
+  emergency_name text check (length(emergency_name) <= 120),
+  emergency_relation text check (length(emergency_relation) <= 40),
+  emergency_phone text check (emergency_phone is null or emergency_phone ~ '^\+?[0-9]{10,13}$'),
+  blood_group text check (blood_group is null or blood_group in ('A+','A-','B+','B-','AB+','AB-','O+','O-')),
+  highest_education text check (length(highest_education) <= 160),
+  pan text check (pan is null or pan ~ '^[A-Z]{5}[0-9]{4}[A-Z]$'),
+  aadhaar_last4 text check (aadhaar_last4 is null or aadhaar_last4 ~ '^[0-9]{4}$'),   -- never the full Aadhaar number
+  bank_account_holder text check (length(bank_account_holder) <= 120),
+  bank_account_no text check (bank_account_no is null or bank_account_no ~ '^[0-9]{9,18}$'),
+  bank_ifsc text check (bank_ifsc is null or bank_ifsc ~ '^[A-Z]{4}0[A-Z0-9]{6}$'),
+  declaration_accepted boolean not null default false,
+  requested_at timestamptz, submitted_at timestamptz,
+  reviewed_by uuid references employees(id), reviewed_at timestamptz,
+  review_note text check (length(review_note) <= 1000),
+  updated_at timestamptz not null default now()
+);
+create table if not exists kyc_documents (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  employee_id uuid not null references employees(id) on delete cascade,
+  doc_type text not null check (doc_type in ('PHOTO','AADHAAR','PAN','ADDRESS_PROOF','BANK_PROOF','EDUCATION','EXPERIENCE','RELIEVING','OTHER')),
+  storage_path text not null unique,
+  original_name text not null check (length(original_name) between 1 and 255),
+  mime_type text not null check (mime_type in ('application/pdf','image/jpeg','image/png','image/webp')),
+  size_bytes bigint not null check (size_bytes between 1 and 5242880),
+  status text not null default 'PENDING' check (status in ('PENDING','VERIFIED','REJECTED','REPLACED')),
+  review_note text check (length(review_note) <= 500),
+  reviewed_by uuid references employees(id), reviewed_at timestamptz,
+  uploaded_at timestamptz not null default now(),
+  check (storage_path like org_id::text || '/' || employee_id::text || '/%')
+);
+create index if not exists kyc_documents_emp on kyc_documents(employee_id, doc_type, uploaded_at desc);
+drop trigger if exists kyc_profiles_touch on kyc_profiles;
+create trigger kyc_profiles_touch before update on kyc_profiles for each row execute function touch_updated_at();
+
+alter table kyc_profiles enable row level security;
+alter table kyc_documents enable row level security;
+drop policy if exists kyc_read on kyc_profiles;
+create policy kyc_read on kyc_profiles for select to authenticated
+  using (org_id = current_org_id() and (employee_id = current_employee_id() or has_perm('kyc.verify')));
+drop policy if exists kyc_self_update on kyc_profiles;
+create policy kyc_self_update on kyc_profiles for update to authenticated
+  using (employee_id = current_employee_id() and status in ('NOT_STARTED','DRAFT','CHANGES_REQUESTED'))
+  with check (employee_id = current_employee_id() and status in ('NOT_STARTED','DRAFT','CHANGES_REQUESTED'));
+revoke insert, update, delete on kyc_profiles from authenticated;
+grant update (date_of_birth, father_name, personal_email, personal_phone, current_address, permanent_address, emergency_name,
+  emergency_relation, emergency_phone, blood_group, highest_education, pan, aadhaar_last4, bank_account_holder, bank_account_no,
+  bank_ifsc, declaration_accepted) on kyc_profiles to authenticated;
+drop policy if exists kyc_docs_read on kyc_documents;
+create policy kyc_docs_read on kyc_documents for select to authenticated
+  using (org_id = current_org_id() and (employee_id = current_employee_id() or has_perm('kyc.verify')));
+drop policy if exists kyc_docs_insert on kyc_documents;
+create policy kyc_docs_insert on kyc_documents for insert to authenticated
+  with check (org_id = current_org_id() and employee_id = current_employee_id() and status = 'PENDING' and reviewed_by is null
+              and exists (select 1 from kyc_profiles k where k.employee_id = current_employee_id() and k.status in ('NOT_STARTED','DRAFT','CHANGES_REQUESTED')));
+revoke update, delete on kyc_documents from authenticated;
+
+-- A new upload of the same type replaces the older pending/rejected one (nothing is deleted).
+create or replace function kyc_doc_replace() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  update kyc_documents set status = 'REPLACED'
+   where employee_id = new.employee_id and doc_type = new.doc_type and id <> new.id and status in ('PENDING','REJECTED')
+     and new.doc_type not in ('EDUCATION','EXPERIENCE','OTHER');
+  update kyc_profiles set status = 'DRAFT' where employee_id = new.employee_id and status = 'NOT_STARTED';
+  return new;
+end $$;
+drop trigger if exists kyc_documents_replace on kyc_documents;
+create trigger kyc_documents_replace after insert on kyc_documents for each row execute function kyc_doc_replace();
+create or replace function kyc_profile_draft() returns trigger language plpgsql as $$
+begin
+  if new.status = 'NOT_STARTED' and old.status = 'NOT_STARTED' then new.status := 'DRAFT'; end if;
+  return new;
+end $$;
+drop trigger if exists kyc_profiles_draft on kyc_profiles;
+create trigger kyc_profiles_draft before update on kyc_profiles for each row execute function kyc_profile_draft();
+
+insert into storage.buckets(id, name, public) values ('kyc-documents', 'kyc-documents', false) on conflict (id) do nothing;
+drop policy if exists "kyc upload own" on storage.objects;
+create policy "kyc upload own" on storage.objects for insert to authenticated
+  with check (bucket_id = 'kyc-documents' and (storage.foldername(name))[1] = current_org_id()::text
+              and (storage.foldername(name))[2] = current_employee_id()::text);
+drop policy if exists "kyc read" on storage.objects;
+create policy "kyc read" on storage.objects for select to authenticated
+  using (bucket_id = 'kyc-documents' and (storage.foldername(name))[1] = current_org_id()::text
+         and ((storage.foldername(name))[2] = current_employee_id()::text or has_perm('kyc.verify')));
+
+-- Send the "please complete your KYC" chat message (from the sender to the employee) + notification.
+create or replace function kyc_send_request(p_emp uuid, p_sender uuid) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare e employees; v_key text; v_ch uuid; v_first text;
+begin
+  select * into e from employees where id = p_emp;
+  if e.id is null or e.role = 'SUPER_ADMIN' or p_sender is null or p_sender = p_emp then return; end if;
+  if not exists (select 1 from employees where id = p_sender and org_id = e.org_id and status <> 'EXITED') then return; end if;
+  insert into kyc_profiles(employee_id, org_id) values (e.id, e.org_id) on conflict do nothing;
+  update kyc_profiles set requested_at = now() where employee_id = e.id;
+  v_key := least(p_sender::text, p_emp::text) || ':' || greatest(p_sender::text, p_emp::text);
+  insert into chat_channels(org_id, name, channel_type, direct_key, created_by)
+  values (e.org_id, 'Direct message', 'DIRECT', v_key, p_sender)
+  on conflict (org_id, direct_key) do update set direct_key = excluded.direct_key returning id into v_ch;
+  insert into chat_channel_members(channel_id, employee_id, member_role) values (v_ch, p_sender, 'OWNER'), (v_ch, p_emp, 'MEMBER') on conflict do nothing;
+  v_first := split_part(e.full_name, ' ', 1);
+  insert into chat_messages(org_id, channel_id, author_id, body) values (e.org_id, v_ch, p_sender,
+    'Hi ' || v_first || ' 👋 VSM family mein welcome! Please apna KYC complete kar do — Menu → My KYC (/kyc).' || chr(10) ||
+    'Form mein personal details, emergency contact aur bank details bharo, aur ye documents upload karo:' || chr(10) ||
+    '• Passport-size photo' || chr(10) || '• Aadhaar (masked copy — sirf last 4 digits dikhne chahiye)' || chr(10) ||
+    '• PAN card' || chr(10) || '• Address proof' || chr(10) || '• Cancelled cheque / passbook' || chr(10) || '• Highest qualification certificate' || chr(10) ||
+    'Submit karte hi HR verify karega. Koi doubt ho toh yahin message karo.');
+  perform notify(e.org_id, e.id, 'SYSTEM', 'Complete your KYC', 'Fill the form and upload your documents so HR can verify them.', '/kyc', 'kyc-request-' || e.id || '-' || to_char(now(), 'YYYYMMDDHH24MI'));
+end $$;
+revoke all on function kyc_send_request(uuid, uuid) from public, anon, authenticated;
+
+create or replace function kyc_on_employee_created() returns trigger
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if new.role = 'SUPER_ADMIN' then return new; end if;
+  insert into kyc_profiles(employee_id, org_id) values (new.id, new.org_id) on conflict do nothing;
+  if current_employee_id() is not null then perform kyc_send_request(new.id, current_employee_id()); end if;
+  return new;
+end $$;
+drop trigger if exists employees_kyc_request on employees;
+create trigger employees_kyc_request after insert on employees for each row execute function kyc_on_employee_created();
+insert into kyc_profiles(employee_id, org_id) select id, org_id from employees where role <> 'SUPER_ADMIN' and status <> 'EXITED' on conflict do nothing;
+
+-- HR: (re)send the KYC reminder.
+create or replace function kyc_remind(p_emp uuid) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if not has_perm('kyc.verify') and not has_perm('people.manage') then raise exception 'Only HR can send KYC reminders.' using errcode = '42501'; end if;
+  if not exists (select 1 from employees where id = p_emp and org_id = current_org_id()) then raise exception 'Unknown employee.' using errcode = '42501'; end if;
+  if exists (select 1 from kyc_profiles where employee_id = p_emp and status = 'VERIFIED') then raise exception 'KYC is already verified.'; end if;
+  perform kyc_send_request(p_emp, current_employee_id());
+end $$;
+
+-- Employee submits: checks the required fields and documents.
+create or replace function kyc_submit() returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare k kyc_profiles; v_missing text[]; d text; v_hr record;
+begin
+  select * into k from kyc_profiles where employee_id = current_employee_id() for update;
+  if k.employee_id is null then raise exception 'No KYC form for your account.' using errcode = '42501'; end if;
+  if k.status not in ('NOT_STARTED','DRAFT','CHANGES_REQUESTED') then raise exception 'Your KYC is already submitted.'; end if;
+  v_missing := array_remove(array[
+    case when k.date_of_birth is null then 'date of birth' end, case when k.father_name is null then 'father''s name' end,
+    case when k.personal_phone is null then 'personal phone' end, case when k.current_address is null then 'current address' end,
+    case when k.permanent_address is null then 'permanent address' end, case when k.emergency_name is null or k.emergency_phone is null then 'emergency contact' end,
+    case when k.pan is null then 'PAN' end, case when k.aadhaar_last4 is null then 'Aadhaar last 4 digits' end,
+    case when k.bank_account_no is null or k.bank_ifsc is null or k.bank_account_holder is null then 'bank details' end,
+    case when not k.declaration_accepted then 'the declaration' end], null);
+  foreach d in array kyc_required_docs() loop
+    if not exists (select 1 from kyc_documents where employee_id = k.employee_id and doc_type = d and status in ('PENDING','VERIFIED')) then
+      v_missing := v_missing || (lower(replace(d, '_', ' ')) || ' document');
+    end if;
+  end loop;
+  if cardinality(v_missing) > 0 then raise exception 'Still missing: %.', array_to_string(v_missing, ', '); end if;
+  update kyc_profiles set status = 'SUBMITTED', submitted_at = now() where employee_id = k.employee_id;
+  for v_hr in select e.id from employees e where e.org_id = k.org_id and e.status <> 'EXITED' and e.id <> k.employee_id
+                and employee_has_perm(e.id, 'kyc.verify') and e.role <> 'SUPER_ADMIN' loop
+    perform notify(k.org_id, v_hr.id, 'SYSTEM', 'KYC submitted · ' || (select full_name from employees where id = k.employee_id),
+      'Documents are ready to verify.', '/people/kyc?e=' || k.employee_id, 'kyc-sub-' || k.employee_id || '-' || extract(epoch from now())::bigint);
+  end loop;
+end $$;
+
+-- HR reviews one document.
+create or replace function kyc_review_document(p_doc uuid, p_decision text, p_note text default null) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare d kyc_documents;
+begin
+  select * into d from kyc_documents where id = p_doc and org_id = current_org_id() for update;
+  if d.id is null or not has_perm('kyc.verify') then raise exception 'Only HR can verify KYC documents.' using errcode = '42501'; end if;
+  if d.employee_id = current_employee_id() then raise exception 'You can''t verify your own documents.' using errcode = '42501'; end if;
+  if p_decision not in ('VERIFIED','REJECTED') then raise exception 'Unknown decision.'; end if;
+  if p_decision = 'REJECTED' and length(trim(coalesce(p_note, ''))) < 3 then raise exception 'Say why the document is rejected.'; end if;
+  update kyc_documents set status = p_decision, review_note = nullif(trim(p_note), ''), reviewed_by = current_employee_id(), reviewed_at = now() where id = p_doc;
+end $$;
+
+-- HR decides the whole KYC. Verified → PAN/bank copied into payroll details where those are still empty.
+create or replace function kyc_review(p_emp uuid, p_decision text, p_note text default null) returns void
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare k kyc_profiles; d text; v_sender uuid := current_employee_id();
+begin
+  select * into k from kyc_profiles where employee_id = p_emp and org_id = current_org_id() for update;
+  if k.employee_id is null or not has_perm('kyc.verify') then raise exception 'Only HR can verify KYC.' using errcode = '42501'; end if;
+  if p_emp = current_employee_id() then raise exception 'You can''t verify your own KYC.' using errcode = '42501'; end if;
+  if k.status <> 'SUBMITTED' then raise exception 'Only submitted KYC can be reviewed.'; end if;
+  if p_decision = 'VERIFIED' then
+    foreach d in array kyc_required_docs() loop
+      if not exists (select 1 from kyc_documents where employee_id = p_emp and doc_type = d and status = 'VERIFIED') then
+        raise exception 'Verify every required document first (% is not verified).', lower(replace(d, '_', ' '));
+      end if;
+    end loop;
+    update kyc_profiles set status = 'VERIFIED', reviewed_by = v_sender, reviewed_at = now(), review_note = nullif(trim(p_note), '') where employee_id = p_emp;
+    insert into employee_statutory(employee_id, org_id) values (p_emp, k.org_id) on conflict do nothing;
+    update employee_statutory set pan = coalesce(pan, k.pan), bank_account_no = coalesce(bank_account_no, k.bank_account_no),
+           bank_ifsc = coalesce(bank_ifsc, k.bank_ifsc), bank_account_holder = coalesce(bank_account_holder, k.bank_account_holder)
+     where employee_id = p_emp;
+    perform notify(k.org_id, p_emp, 'SYSTEM', 'KYC verified ✓', 'Thanks — HR has verified your documents.', '/kyc', 'kyc-ok-' || p_emp);
+  elsif p_decision = 'CHANGES_REQUESTED' then
+    if length(trim(coalesce(p_note, ''))) < 3 then raise exception 'Tell them what to fix.'; end if;
+    update kyc_profiles set status = 'CHANGES_REQUESTED', reviewed_by = v_sender, reviewed_at = now(), review_note = trim(p_note) where employee_id = p_emp;
+    perform notify(k.org_id, p_emp, 'SYSTEM', 'KYC needs changes', left(trim(p_note), 160), '/kyc', 'kyc-chg-' || p_emp || '-' || extract(epoch from now())::bigint);
+  else
+    raise exception 'Unknown decision.';
+  end if;
+  perform log_audit('kyc.' || lower(p_decision), 'employee', p_emp::text, '{}');   -- no numbers in the audit log
+end $$;
+revoke all on function kyc_submit(), kyc_review_document(uuid, text, text), kyc_review(uuid, text, text), kyc_remind(uuid) from public, anon;
+grant execute on function kyc_submit(), kyc_review_document(uuid, text, text), kyc_review(uuid, text, text), kyc_remind(uuid) to authenticated;
+
+-- Employees can't delete key results (even on their own OKR); OKR admins and managers of the owner can.
+drop policy if exists kr_write on okr_key_results;
+drop policy if exists kr_insert on okr_key_results;
+create policy kr_insert on okr_key_results for insert to authenticated
+  with check (org_id = current_org_id() and can_edit_objective(objective_id));
+drop policy if exists kr_update on okr_key_results;
+create policy kr_update on okr_key_results for update to authenticated
+  using (org_id = current_org_id() and can_edit_objective(objective_id)) with check (org_id = current_org_id() and can_edit_objective(objective_id));
+drop policy if exists kr_delete on okr_key_results;
+create policy kr_delete on okr_key_results for delete to authenticated
+  using (org_id = current_org_id() and (has_perm('okr.manage')
+         or exists (select 1 from okr_objectives o where o.id = objective_id and o.owner_id <> current_employee_id() and can_edit_objective(o.id))));
+
+-- Teams the signed-in person may add members to (for the "Add to team" picker).
+create or replace function my_manageable_teams() returns table(id uuid, name text)
+language sql stable security definer set search_path = public, pg_temp as $$
+  select t.id, t.name from org_teams t where t.org_id = current_org_id() and t.is_active and can_manage_team(t.id) order by t.name
+$$;
+revoke all on function my_manageable_teams() from public, anon;
+grant execute on function my_manageable_teams() to authenticated;
+
+-- >>> 0036_duplicate_lookup.sql
+-- =============================================================================
+-- 0036 · Say WHO already uses an email / Employee ID when adding someone fails as a duplicate.
+-- Only for people allowed to add employees; returns the minimum needed to find the existing record.
+-- =============================================================================
+create or replace function find_employee_conflict(p_email text, p_code text) returns jsonb
+language sql stable security definer set search_path = public, pg_temp as $$
+  select jsonb_build_object('id', e.id, 'employee_code', e.employee_code, 'full_name', e.full_name, 'status', e.status,
+           'official_email', e.official_email,
+           'field', case when lower(e.official_email) = lower(btrim(coalesce(p_email, ''))) then 'email' else 'code' end)
+  from employees e
+  where e.org_id = current_org_id()
+    and (has_perm('people.manage') or has_perm('people.onboard') or has_perm('people.add_team'))
+    and (lower(e.official_email) = lower(btrim(coalesce(p_email, '')))
+         or (nullif(btrim(coalesce(p_code, '')), '') is not null and upper(e.employee_code) = upper(btrim(p_code))))
+  order by (lower(e.official_email) = lower(btrim(coalesce(p_email, '')))) desc
+  limit 1
+$$;
+revoke all on function find_employee_conflict(text, text) from public, anon;
+grant execute on function find_employee_conflict(text, text) to authenticated;
+
+-- >>> 0037_employee_links_repair.sql
+-- =============================================================================
+-- 0037 · Make sure the employee → manager / department / shift links exist on every database, then ask the
+-- Supabase API (PostgREST) to reload its schema cache so the app can use them straight away.
+-- Safe to run any number of times.
+-- =============================================================================
+do $$
+begin
+  if not exists (select 1 from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any(c.conkey)
+                 where c.conrelid = 'public.employees'::regclass and c.contype = 'f' and a.attname = 'manager_id') then
+    update employees e set manager_id = null where manager_id is not null and not exists (select 1 from employees m where m.id = e.manager_id);
+    alter table employees add constraint employees_manager_id_fkey foreign key (manager_id) references employees(id) on delete set null;
+  end if;
+  if not exists (select 1 from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any(c.conkey)
+                 where c.conrelid = 'public.employees'::regclass and c.contype = 'f' and a.attname = 'department_id') then
+    update employees e set department_id = null where department_id is not null and not exists (select 1 from departments d where d.id = e.department_id);
+    alter table employees add constraint employees_department_id_fkey foreign key (department_id) references departments(id) on delete set null;
+  end if;
+  if not exists (select 1 from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any(c.conkey)
+                 where c.conrelid = 'public.employees'::regclass and c.contype = 'f' and a.attname = 'shift_id') then
+    update employees e set shift_id = null where shift_id is not null and not exists (select 1 from shifts s where s.id = e.shift_id);
+    alter table employees add constraint employees_shift_id_fkey foreign key (shift_id) references shifts(id) on delete set null;
+  end if;
+end $$;
+
+notify pgrst, 'reload schema';
+
+-- >>> 0038_auth_login_lookup.sql
+-- =============================================================================
+-- 0038 · Find an existing Supabase login by email (service role only), so a welcome email can re-use a login left
+-- over from an earlier attempt instead of failing with "already registered". Never callable from the browser.
+-- =============================================================================
+create or replace function auth_login_for_email(p_email text) returns jsonb
+language sql stable security definer set search_path = public, auth, pg_temp as $$
+  select jsonb_build_object('user_id', u.id,
+           'employee_id', e.id, 'employee_name', e.full_name, 'employee_org', e.org_id, 'is_super_admin', coalesce(e.role = 'SUPER_ADMIN', false))
+  from auth.users u left join public.employees e on e.user_id = u.id
+  where lower(u.email) = lower(btrim(p_email))
+  limit 1
+$$;
+revoke all on function auth_login_for_email(text) from public, anon, authenticated;
+
+-- >>> 0039_chat_files_delivery.sql
+-- =============================================================================
+-- 0039 · Chat: any file type up to 50 MB (direct browser upload), and "delivered" ticks.
+-- 50 MB is the Supabase Free-plan per-file maximum; on Pro raise it in Storage settings and here.
+-- =============================================================================
+update storage.buckets set allowed_mime_types = null, file_size_limit = 52428800 where id = 'chat-files';
+
+do $$
+declare c record;
+begin
+  for c in select conname from pg_constraint where conrelid = 'public.chat_attachments'::regclass and contype = 'c'
+            and (pg_get_constraintdef(oid) ilike '%mime_type%' or pg_get_constraintdef(oid) ilike '%file_size%') loop
+    execute format('alter table chat_attachments drop constraint %I', c.conname);
+  end loop;
+end $$;
+alter table chat_attachments add constraint chat_attachments_mime_type_check check (length(mime_type) between 3 and 200);
+alter table chat_attachments add constraint chat_attachments_file_size_check check (file_size between 1 and 52428800);
+alter table chat_attachments drop constraint if exists chat_attachments_file_name_check;
+alter table chat_attachments add constraint chat_attachments_file_name_check check (length(file_name) between 1 and 255);
+
+-- Delivered = the person's app has been open since the message arrived (refreshed by the app every ~20 s).
+alter table chat_channel_members add column if not exists last_delivered_at timestamptz;
+create or replace function chat_mark_delivered() returns void
+language sql security definer set search_path = public, pg_temp as $$
+  update chat_channel_members set last_delivered_at = now()
+   where employee_id = current_employee_id() and (last_delivered_at is null or last_delivered_at < now() - interval '15 seconds')
+$$;
+revoke all on function chat_mark_delivered() from public, anon;
+grant execute on function chat_mark_delivered() to authenticated;

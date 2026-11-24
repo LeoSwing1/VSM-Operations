@@ -15,7 +15,9 @@ begin
       ('0021 approvals', 'public.workflow_approval_cases'), ('0023 channels', 'public.delivery_outbox'),
       ('0024 posts/teams', 'public.designations'), ('0027 hardening', 'public.app_errors'),
       ('0028 field attendance', 'public.office_locations'), ('0029 India payroll', 'public.payroll_statutory_settings'),
-      ('0030 Google Workspace', 'public.google_workspace_settings'), ('0031 VSM Scholars', 'public.scholar_students')) as t(label, obj) loop
+      ('0030 Google Workspace', 'public.google_workspace_settings'), ('0031 VSM Scholars', 'public.scholar_students'),
+      ('0032 OKRs & KPIs', 'public.okr_objectives'), ('0033 AI assistant', 'public.ai_settings'), ('0034 reports', 'public.report_schedules'),
+      ('0035 owners & KYC', 'public.kyc_profiles')) as t(label, obj) loop
     area := 'migrations'; check_name := r.label; result := case when to_regclass(r.obj) is null then 'MISSING ✗' else 'ok' end; return next;
   end loop;
   area := 'migrations'; check_name := '0022 repair';
@@ -48,7 +50,8 @@ begin
     perform set_config('request.jwt.claims', json_build_object('sub', v_sa, 'role', 'authenticated')::text, true);
     perform set_config('role', 'authenticated', true);
     foreach v_txt in array array['employees','attendance_events','tasks','notifications','leave_requests','chat_channels','org_teams','designations','role_permissions',
-                                 'office_locations','payroll_statutory_settings','scholar_courses','scholar_students','google_workspace_settings'] loop
+                                 'office_locations','payroll_statutory_settings','scholar_courses','scholar_students','google_workspace_settings',
+                                 'okr_objectives','kpi_definitions','review_cycles','training_records','ai_settings','report_schedules','report_runs','kyc_profiles','kyc_documents'] loop
       begin
         execute format('select count(*) from public.%I', v_txt) into v_n;
         area := 'app reads (RLS as super admin)'; check_name := v_txt; result := v_n || ' rows'; return next;

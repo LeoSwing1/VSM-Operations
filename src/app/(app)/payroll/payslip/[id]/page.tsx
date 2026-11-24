@@ -16,7 +16,7 @@ export default async function Payslip({ params }: { params: Promise<{ id: string
   const { data: e } = await sb
     .from("payroll_entries")
     .select(
-      "*, employee:employees!payroll_entries_employee_id_fkey(full_name, employee_code, designation, joining_date, department:departments(name))",
+      "*, employee:employees!payroll_entries_employee_id_fkey(full_name, employee_code, designation, joining_date, department:departments!department_id(name))",
     )
     .eq("id", id)
     .maybeSingle();

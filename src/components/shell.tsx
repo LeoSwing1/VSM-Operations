@@ -50,9 +50,13 @@ export function navFor(ctx: Ctx): NavItem[] {
     },
     { href: "/notifications", label: "Notifications", group: "Work", show: true },
     { href: "/analytics/my-performance", label: "My performance", group: "Me", show: true },
+    { href: "/growth", label: "OKRs, KPIs & growth", group: "Me", show: true },
+    { href: "/kyc", label: "My KYC", group: "Me", show: ctx.role !== "SUPER_ADMIN" },
+    { href: "/assistant", label: "AI assistant", group: "Me", show: can(ctx, "ai.use") },
     { href: "/payroll/my-salary", label: "My salary", group: "Me", show: true },
     { href: "/finance/expenses", label: "My expenses", group: "Me", show: true },
     { href: "/people", label: "People", group: "Organisation", show: canAny(ctx, ["people.view_all", "people.view_team"]) },
+    { href: "/people/kyc", label: "KYC verification", group: "Organisation", show: can(ctx, "kyc.verify") },
     { href: "/recruitment", label: "Recruitment", group: "Organisation", show: canAny(ctx, ["recruit.view", "recruit.manage"]) },
     {
       href: "/performance",
@@ -76,6 +80,21 @@ export function navFor(ctx: Ctx): NavItem[] {
       ]),
     },
     { href: "/finance/reports", label: "Finance reports", group: "Organisation", show: canAny(ctx, ["finance.view", "finance.manage"]) },
+    {
+      href: "/reports",
+      label: "Reports & BI",
+      group: "Organisation",
+      show: canAny(ctx, [
+        "reports.schedule",
+        "reports.view_org",
+        "attendance.manage",
+        "crm.view_all",
+        "finance.view",
+        "finance.export",
+        "scholars.view",
+        "performance.view_all",
+      ]),
+    },
     { href: "/scholars", label: "VSM Scholars", group: "Organisation", show: canAny(ctx, ["scholars.view", "scholars.teach"]) },
     {
       href: "/operations",
@@ -89,6 +108,7 @@ export function navFor(ctx: Ctx): NavItem[] {
     { href: "/settings/chat-moderation", label: "Chat moderation", group: "Admin", show: can(ctx, "communication.moderate") },
     { href: "/settings/integrations", label: "Integrations", group: "Admin", show: can(ctx, "settings.manage") },
     { href: "/settings/workflows", label: "Workflow automation", group: "Admin", show: can(ctx, "settings.manage") },
+    { href: "/settings/ai", label: "AI assistant", group: "Admin", show: can(ctx, "settings.manage") },
     { href: "/settings/attendance", label: "Shifts & holidays", group: "Admin", show: can(ctx, "attendance.manage") },
     { href: "/settings/audit-logs", label: "Audit log", group: "Admin", show: can(ctx, "audit.view") },
   ];
@@ -118,7 +138,7 @@ export function Shell({ ctx, unread, today, children }: { ctx: Ctx; unread: numb
           <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-volt text-xs font-bold text-[#0b0b0c]">{initials}</span>
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold">{ctx.full_name}</p>
-            <p className="truncate text-xs text-muted">{subtitleFor(ctx.role, ctx.designation, ROLE_LABEL[ctx.role])}</p>
+            <p className="truncate text-xs text-muted">{subtitleFor(ctx.role, ctx.designation, ROLE_LABEL[ctx.role], ctx.is_owner)}</p>
           </div>
         </div>
         <div className="flex items-center gap-2 px-2">
@@ -148,13 +168,16 @@ export function Shell({ ctx, unread, today, children }: { ctx: Ctx; unread: numb
             id={ctx.employee_id}
             name={ctx.full_name}
             short={shortName(ctx.full_name)}
-            subtitle={subtitleFor(ctx.role, ctx.designation, ROLE_LABEL[ctx.role])}
+            subtitle={subtitleFor(ctx.role, ctx.designation, ROLE_LABEL[ctx.role], ctx.is_owner)}
             initials={initialsOf(ctx.full_name)}
             photo={ctx.photo_url}
-            email={ctx.email}
+            email={ctx.employee_code ? `${ctx.employee_code} · ${ctx.email}` : ctx.email}
             links={[
               { href: `/people/${ctx.employee_id}`, label: "My profile" },
               { href: `/people/${ctx.employee_id}?tab=activity`, label: "My activity" },
+              { href: `/people/${ctx.employee_id}?tab=performance`, label: "My performance & quality" },
+              { href: "/payroll/my-salary", label: "My salary & payslips" },
+              ...(ctx.role !== "SUPER_ADMIN" ? [{ href: "/kyc", label: "My KYC" }] : []),
               { href: "/attendance", label: "My attendance" },
               { href: "/notifications/preferences", label: "Notification settings" },
               { href: "/login/reset", label: "Change password" },

@@ -6,6 +6,34 @@ import { temporaryPassword } from "@/lib/passwords";
 
 export type WelcomeMode = "link" | "password";
 
+type ExistingLogin = { user_id: string; employee_id: string | null; employee_name: string | null; is_super_admin: boolean };
+
+/**
+ * Find a Supabase login by email. Uses the database helper from migration 0038 when it exists; otherwise
+ * (SQL not run yet) falls back to paging through the Auth admin API. Server-only (service role).
+ */
+async function findLoginByEmail(email: string): Promise<ExistingLogin | null> {
+  const admin = supabaseAdmin();
+  const want = email.trim().toLowerCase();
+  const { data, error } = await admin.rpc("auth_login_for_email", { p_email: want });
+  if (!error) return (data as ExistingLogin | null) ?? null;
+  let found: string | null = null;
+  for (let page = 1; page <= 50 && !found; page++) {
+    const { data: list, error: lErr } = await admin.auth.admin.listUsers({ page, perPage: 200 });
+    if (lErr || !list?.users?.length) break;
+    found = list.users.find((u) => (u.email ?? "").toLowerCase() === want)?.id ?? null;
+    if (list.users.length < 200) break;
+  }
+  if (!found) return null;
+  const { data: emp } = await admin.from("employees").select("id, full_name, role").eq("user_id", found).maybeSingle();
+  return {
+    user_id: found,
+    employee_id: emp?.id ?? null,
+    employee_name: emp?.full_name ?? null,
+    is_super_admin: emp?.role === "SUPER_ADMIN",
+  };
+}
+
 /**
  * Creates (if needed) the employee's login and emails a welcome with their details.
  *  - "link": a one-time "set my password" link (recommended)
@@ -18,7 +46,7 @@ export async function sendWelcome(employeeId: string, mode: WelcomeMode): Promis
   const { data: e, error } = await admin
     .from("employees")
     .select(
-      "id, org_id, full_name, official_email, employee_code, designation, joining_date, role, user_id, department:departments(name), manager:employees!employees_manager_id_fkey(full_name)",
+      "id, org_id, full_name, official_email, employee_code, designation, joining_date, role, user_id, department:departments!department_id(name), manager:employees!manager_id(full_name)",
     )
     .eq("id", employeeId)
     .single();
@@ -30,10 +58,32 @@ export async function sendWelcome(employeeId: string, mode: WelcomeMode): Promis
     password = "";
   let userId = e.user_id as string | null;
 
+  // A login with this email may already exist (an earlier attempt, or a removed employee). Re-use it when it isn't
+  // anyone else's; refuse clearly when it belongs to another person.
+  if (!userId) {
+    const existing = await findLoginByEmail(e.official_email);
+    if (existing?.user_id) {
+      if (existing.employee_id && existing.employee_id !== e.id) {
+        throw new Error(
+          existing.is_super_admin
+            ? "That email is the Super Admin's login. Use a different email for this employee."
+            : `That email is already the login of ${existing.employee_name}. Use a different email, or change theirs first.`,
+        );
+      }
+      const { error: linkErr } = await admin.from("employees").update({ user_id: existing.user_id }).eq("id", e.id);
+      if (linkErr) throw new Error("Could not attach the existing login: " + linkErr.message);
+      userId = existing.user_id as string;
+    }
+  }
+
   if (mode === "password") {
     password = temporaryPassword();
     if (userId) {
-      const { error: uErr } = await admin.auth.admin.updateUserById(userId, { password, user_metadata: { must_change_password: true } });
+      const { error: uErr } = await admin.auth.admin.updateUserById(userId, {
+        password,
+        user_metadata: { must_change_password: true },
+        email_confirm: true,
+      });
       if (uErr) throw uErr;
     } else {
       const { data, error: cErr } = await admin.auth.admin.createUser({

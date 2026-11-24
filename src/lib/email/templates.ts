@@ -61,6 +61,15 @@ export const templates: Record<string, (p: P) => Rendered> = {
     ),
     text: `Your payslip for ${p.period_start} – ${p.period_end} is available. Sign in to view it: ${app()}/payroll/my-salary`,
   }),
+  "report.ready": (p) => ({
+    subject: `Report ready: ${p.report}`,
+    html: layout(
+      `${p.report} is ready`,
+      `Hi ${esc(p.name)}, your scheduled report for <b>${esc(p.period)}</b> has been generated. For privacy, the figures are only available after you sign in.`,
+      { label: "Download report", href: `${app()}/api/reports/runs/${p.run_id}` },
+    ),
+    text: `Hi ${p.name}, your report "${p.report}" for ${p.period} is ready. Sign in to download: ${app()}/api/reports/runs/${p.run_id}`,
+  }),
   "digest.daily": (p) => {
     const items = (Array.isArray(p.items) ? p.items : []) as { template: string; payload: P; category: string }[];
     const rows = items.map((i) => ({ category: i.category, subject: templates[i.template]?.(i.payload ?? {}).subject ?? i.template }));
@@ -129,6 +138,7 @@ templates["employee.welcome"] = (p) => ({
       (p.password
         ? `<p style="color:#c9c9c4">Sign in with the temporary password above — you'll be asked to choose your own straight away.</p>`
         : `<p style="color:#c9c9c4">Click the button to set your password. The link works once and expires in 24 hours.</p>`) +
+      `<p style="color:#c9c9c4"><b>First task:</b> complete your KYC (Menu → My KYC) — fill the form and upload your documents so HR can verify them.</p>` +
       `<p style="color:#7a7a76;font-size:13px">On day one: clock in from the Attendance page, turn on desktop notifications, and say hi in your team chat.</p>`,
     { label: p.password ? "Sign in to VSM Ops" : "Set my password", href: String(p.link || `${app()}/login`) },
   ),
@@ -136,7 +146,7 @@ templates["employee.welcome"] = (p) => ({
     p.password
       ? `Temporary password: ${p.password} (you must change it at first sign-in)\nSign in: ${app()}/login`
       : `Set your password: ${p.link}`
-  }`,
+  }\nFirst task: complete your KYC (Menu → My KYC).`,
 });
 
 templates["auth.new_password"] = (p) => ({

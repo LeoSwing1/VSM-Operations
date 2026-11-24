@@ -56,59 +56,100 @@ export async function joinChatChannel(fd: FormData) {
   if (error && error.code !== "23505") flash("/chat", "err", dbMessage(error));
   redirect(`/chat/${id}`);
 }
-export async function sendChatMessage(fd: FormData) {
+/** Shared by the instant (client) send and the plain form fallback. Returns an error message or null. */
+async function insertChatMessage(fd: FormData): Promise<{ channel: string; error: string | null }> {
   const ctx = await requirePerm("communication.send");
   const channel = str(fd, "channel_id"),
     body = str(fd, "body").trim(),
     parent = optStr(fd, "parent_message_id");
+  // Files are uploaded straight from the browser to private storage (any type, up to 50 MB) and only referenced
+  // here; the plain-form fallback still sends the file itself.
+  const MAX = 52428800;
+  const pre = {
+    path: optStr(fd, "attachment_path"),
+    name: optStr(fd, "attachment_name"),
+    mime: optStr(fd, "attachment_mime"),
+    size: Number(fd.get("attachment_size") ?? 0),
+  };
   const file = fd.get("file");
-  const upload = file instanceof File && file.size > 0 ? file : null;
-  if (!body && !upload) flash(`/chat/${channel}`, "err", "Write a message or attach a file.");
-  if (body.length > 10000) flash(`/chat/${channel}`, "err", "Message is too long.");
-  const allowed = ["application/pdf", "image/jpeg", "image/png", "image/webp", "text/plain", "application/zip"];
-  if (upload && (upload.size > 15728640 || !allowed.includes(upload.type)))
-    flash(`/chat/${channel}`, "err", "Attachment must be a supported file under 15 MB.");
+  const upload = !pre.path && file instanceof File && file.size > 0 ? file : null;
+  const hasFile = !!pre.path || !!upload;
+  if (!body && !hasFile) return { channel, error: "Write a message or attach a file." };
+  if (body.length > 10000) return { channel, error: "Message is too long." };
+  if ((upload && upload.size > MAX) || (pre.path && (pre.size < 1 || pre.size > MAX)))
+    return { channel, error: "Files can be up to 50 MB." };
   const sb = await supabaseServer();
   let path: string | null = null;
-  if (upload) {
-    path = `${ctx.org_id}/${channel}/${ctx.employee_id}/${crypto.randomUUID()}-${upload.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-100)}`;
-    const { error } = await sb.storage.from("chat-files").upload(path, upload, { contentType: upload.type, upsert: false });
-    if (error) flash(`/chat/${channel}`, "err", dbMessage(error));
+  const prefix = `${ctx.org_id}/${channel}/${ctx.employee_id}/`;
+  if (pre.path) {
+    if (!pre.path.startsWith(prefix) || pre.path.includes("..") || pre.path.slice(prefix.length).includes("/"))
+      return { channel, error: "That file doesn't belong to this chat." };
+    // Use the size/type storage actually recorded, not what the browser claimed.
+    const objectName = pre.path.slice(prefix.length);
+    const { data: listed } = await sb.storage.from("chat-files").list(prefix.slice(0, -1), { search: objectName, limit: 5 });
+    const meta = listed?.find((o) => o.name === objectName)?.metadata as { size?: number; mimetype?: string } | undefined;
+    if (!meta) return { channel, error: "The upload didn't finish. Please attach the file again." };
+    if (typeof meta.size === "number") pre.size = meta.size;
+    if (meta.mimetype) pre.mime = meta.mimetype;
+    if (pre.size < 1 || pre.size > MAX) return { channel, error: "Files can be up to 50 MB." };
+    path = pre.path;
+  } else if (upload) {
+    path = `${prefix}${crypto.randomUUID()}-${upload.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-100)}`;
+    const { error } = await sb.storage
+      .from("chat-files")
+      .upload(path, upload, { contentType: upload.type || "application/octet-stream", upsert: false });
+    if (error) return { channel, error: dbMessage(error) };
   }
+  const fileName = (pre.name ?? upload?.name ?? "file").slice(0, 255);
+  const fileMime = (pre.mime || upload?.type || "application/octet-stream").slice(0, 200);
+  const fileSize = pre.path ? pre.size : (upload?.size ?? 0);
   const { data: message, error } = await sb
     .from("chat_messages")
     .insert({
       org_id: ctx.org_id,
       channel_id: channel,
       author_id: ctx.employee_id,
-      body: body || `Shared ${upload?.name ?? "a file"}`,
+      body: body || `Shared ${fileName}`,
       parent_message_id: parent,
     })
     .select("id")
     .single();
   if (error) {
     if (path) await sb.storage.from("chat-files").remove([path]);
-    flash(`/chat/${channel}`, "err", dbMessage(error));
+    return { channel, error: dbMessage(error) };
   }
-  if (upload && path) {
+  if (hasFile && path) {
     const { error: attachError } = await sb.from("chat_attachments").insert({
       org_id: ctx.org_id,
       channel_id: channel,
       message_id: message.id,
       uploaded_by: ctx.employee_id,
       storage_path: path,
-      file_name: upload.name,
-      mime_type: upload.type,
-      file_size: upload.size,
+      file_name: fileName,
+      mime_type: fileMime,
+      file_size: fileSize,
     });
     if (attachError) {
       await sb.storage.from("chat-files").remove([path]);
-      flash(`/chat/${channel}`, "err", dbMessage(attachError));
+      return { channel, error: dbMessage(attachError) };
     }
   }
+  return { channel, error: null };
+}
+
+export async function sendChatMessage(fd: FormData) {
+  const { channel, error } = await insertChatMessage(fd);
+  if (error) flash(`/chat/${channel}`, "err", error);
   revalidatePath(`/chat/${channel}`);
   redirect(`/chat/${channel}`);
 }
+
+/** Instant send from the chat window: no page reload; realtime delivers it to everyone else. */
+export async function postChatMessage(fd: FormData): Promise<{ ok: boolean; error?: string }> {
+  const { error } = await insertChatMessage(fd);
+  return error ? { ok: false, error } : { ok: true };
+}
+
 export async function addChatReaction(fd: FormData) {
   const ctx = await requirePerm("communication.send");
   const channel = str(fd, "channel_id"),

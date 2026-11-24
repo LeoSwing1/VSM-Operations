@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import clsx from "clsx";
+import { stableNow, useNow } from "@/lib/use-now";
 import { nextActions, type AttendanceEvent } from "@/lib/engines/attendance";
 import { hms, liveClock } from "@/lib/engines/clock";
 import { enqueuePunch, flushQueue, getPosition, loadQueue } from "@/lib/offline-punches";
@@ -25,13 +26,10 @@ export function PunchCard({ events, tz, targetMinutes = 480 }: { events: Attenda
   const [step, setStep] = useState("");
   const evs = optimistic ?? events;
   useEffect(() => setOptimistic(null), [events]);
-  const [now, setNow] = useState(() => Date.now());
-  const c = useMemo(() => liveClock(evs, now), [evs, now]);
-  useEffect(() => {
-    if (c.state !== "WORKING" && c.state !== "BREAK") return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [c.state]);
+  const [ticking, setTicking] = useState(false);
+  const now = useNow(ticking);
+  const c = useMemo(() => liveClock(evs, now ?? stableNow(evs)), [evs, now]);
+  useEffect(() => setTicking(c.state === "WORKING" || c.state === "BREAK"), [c.state]);
 
   const sync = useCallback(async () => {
     if (!loadQueue().length || !navigator.onLine) return setQueued(loadQueue().length);
@@ -65,7 +63,6 @@ export function PunchCard({ events, tz, targetMinutes = 480 }: { events: Attenda
   async function doPunch(a: Act, photo: Blob | null) {
     const stamp = new Date().toISOString();
     setOptimistic([...evs, { event_type: a, occurred_at: stamp }]); // clock reacts instantly
-    setNow(Date.now());
     const wantsLocation = (a === "CLOCK_IN" || a === "CLOCK_OUT") && !!req && (req.offices > 0 || req.requireLocation);
     setStep(wantsLocation ? "Getting your location…" : "Saving…");
     const pos = wantsLocation ? await getPosition() : null;

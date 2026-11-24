@@ -8,6 +8,7 @@ export async function POST(req: NextRequest) {
   const pw = String(fd.get("password") ?? ""),
     confirm = String(fd.get("confirm") ?? "");
   const back = fd.get("forced") ? "/login/reset?forced=1" : "/login/reset";
+  if (pw !== pw.trim()) return go(req, msg(back, "err", "Your password can't start or end with a space."));
   if (pw.length < 10 || pw !== confirm) return go(req, msg(back, "err", "Passwords must match and be at least 10 characters."));
   const sb = await supabaseServer();
   const { error } = await sb.auth.updateUser({ password: pw, data: { must_change_password: false } });

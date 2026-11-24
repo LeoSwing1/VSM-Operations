@@ -112,8 +112,9 @@ const col = (n: number) => {
   }
   return s;
 };
-export function makeXlsx(filename: string, rows: (string | number | boolean | null | undefined)[][]) {
-  const sheet = rows
+type Cell = string | number | boolean | null | undefined;
+function sheetXml(rows: Cell[][]) {
+  const data = rows
     .map(
       (row, ri) =>
         `<row r="${ri + 1}">${row
@@ -127,15 +128,35 @@ export function makeXlsx(filename: string, rows: (string | number | boolean | nu
           .join("")}</row>`,
     )
     .join("");
-  const safe = xml(filename.replace(/[\\/?*\[\]:]/g, "_").slice(0, 31) || "Report");
-  const widths = Array.from({ length: Math.max(1, ...rows.map((r) => r.length)) }, (_, i) => {
+  const ncol = Math.max(1, ...rows.map((r) => r.length));
+  const widths = Array.from({ length: ncol }, (_, i) => {
     const m = Math.max(10, ...rows.map((r) => String(r[i] ?? "").length));
     return `<col min="${i + 1}" max="${i + 1}" width="${Math.min(48, m + 2)}" customWidth="1"/>`;
   }).join("");
+  return `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="19"/><cols>${widths}</cols><sheetData>${data}</sheetData><autoFilter ref="A1:${col(ncol)}${Math.max(1, rows.length)}"/></worksheet>`;
+}
+
+/** Workbook with several sheets (e.g. the accountant pack). Sheet names are made unique and Excel-safe. */
+export function makeXlsxSheets(sheets: { name: string; rows: Cell[][] }[]) {
+  const used = new Set<string>();
+  const names = sheets.map((sh, i) => {
+    let n = sh.name.replace(/[\\/?*\[\]:]/g, "_").slice(0, 31) || `Sheet${i + 1}`;
+    while (used.has(n.toLowerCase())) n = (n.slice(0, 28) + "_" + (i + 1)).slice(0, 31);
+    used.add(n.toLowerCase());
+    return xml(n);
+  });
+  const list = sheets.length ? sheets : [{ name: "Report", rows: [] }];
   return zip([
     {
       name: "[Content_Types].xml",
-      content: `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+      content: `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${list
+        .map(
+          (_, i) =>
+            `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`,
+        )
+        .join(
+          "",
+        )}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
     },
     {
       name: "_rels/.rels",
@@ -143,21 +164,31 @@ export function makeXlsx(filename: string, rows: (string | number | boolean | nu
     },
     {
       name: "xl/workbook.xml",
-      content: `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${safe.slice(0, 31)}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+      content: `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${list
+        .map((_, i) => `<sheet name="${names[i] ?? "Report"}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`)
+        .join("")}</sheets></workbook>`,
     },
     {
       name: "xl/_rels/workbook.xml.rels",
-      content: `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+      content: `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${list
+        .map(
+          (_, i) =>
+            `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`,
+        )
+        .join(
+          "",
+        )}<Relationship Id="rId${list.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
     },
-    {
-      name: "xl/worksheets/sheet1.xml",
-      content: `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="19"/><cols>${widths}</cols><sheetData>${sheet}</sheetData><autoFilter ref="A1:${col(Math.max(1, ...rows.map((r) => r.length)))}${Math.max(1, rows.length)}"/></worksheet>`,
-    },
+    ...list.map((sh, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, content: sheetXml(sh.rows) })),
     {
       name: "xl/styles.xml",
       content: `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Aptos"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Aptos"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF24313F"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`,
     },
   ]);
+}
+
+export function makeXlsx(filename: string, rows: Cell[][]) {
+  return makeXlsxSheets([{ name: filename || "Report", rows }]);
 }
 export function makePdf(title: string, rows: string[]) {
   const esc = (s: string) =>

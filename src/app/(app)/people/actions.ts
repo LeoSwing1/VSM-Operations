@@ -1,6 +1,6 @@
 "use server";
 import { z } from "zod";
-import { requirePerm, requireContext, ROLES } from "@/lib/auth";
+import { can, requirePerm, requireContext, ROLES } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { sendWelcome } from "@/lib/onboarding";
@@ -43,7 +43,9 @@ function read(fd: FormData) {
 }
 
 export async function createEmployee(fd: FormData) {
-  const ctx = await requirePerm("people.manage");
+  const ctx = await requirePerm("people.manage", "people.onboard", "people.add_team");
+  const teamOnly = !can(ctx, "people.manage") && !can(ctx, "people.onboard");
+  if (teamOnly) fd.set("manager_id", ctx.employee_id); // managers add people into their own team (the DB enforces this too)
   const p = read(fd);
   if (!p.success) flash("/people?new=1", "err", p.error.issues[0]?.message ?? "Check the form.");
   const sb = await supabaseServer();
@@ -54,17 +56,38 @@ export async function createEmployee(fd: FormData) {
     .insert({ ...p.data, employee_code: p.data.employee_code || undefined, org_id: ctx.org_id })
     .select("id")
     .single();
-  if (error) flash("/people?new=1", "err", dbMessage(error));
+  if (error) {
+    if (error.code === "23505") {
+      // Duplicate email or Employee ID: say who has it (they may be exited, so hidden from the default list).
+      const { data: c } = await sb.rpc("find_employee_conflict", { p_email: p.data.official_email, p_code: p.data.employee_code });
+      if (c?.id)
+        flash(
+          `/people?new=1&dup=${c.id}`,
+          "err",
+          `${c.field === "email" ? `The email ${c.official_email}` : `Employee ID ${c.employee_code}`} already belongs to ${c.full_name} (${c.employee_code}, ${String(c.status).toLowerCase().replace("_", " ")}). Open their profile below, or use a different ${c.field === "email" ? "email" : "ID"}.`,
+        );
+    }
+    flash("/people?new=1", "err", dbMessage(error));
+  }
+  // 1b) Optional team: added under the caller's RLS (team leads/managers of that team, or team admins).
+  const teamId = str(fd, "team_id");
+  let teamNote = "";
+  if (/^[0-9a-f-]{36}$/.test(teamId)) {
+    const { error: tErr } = await sb
+      .from("org_team_members")
+      .insert({ org_id: ctx.org_id, team_id: teamId, employee_id: emp.id, member_role: "MEMBER" });
+    teamNote = tErr ? " (couldn't add them to the team — add them from Teams)" : "";
+  }
   // 2) Login + welcome email (service role used only after the permission check above).
-  let note = "Employee added.";
-  const welcome = str(fd, "welcome") || (fd.get("invite") === "on" ? "link" : "none");
+  let note = "Employee added." + teamNote;
+  const welcome = str(fd, "welcome") || (fd.get("invite") === "on" ? "password" : "none");
   if (welcome === "link" || welcome === "password") {
     try {
       await sendWelcome(emp.id, welcome);
       note =
         welcome === "link"
-          ? "Employee added and a welcome email with a set-password link was sent."
-          : "Employee added and a welcome email with a temporary password was sent (they must change it at first sign-in).";
+          ? `Employee added${teamNote} and a welcome email with their Employee ID and a set-password link was sent. A KYC request went to their chat.`
+          : `Employee added${teamNote} and a welcome email with their Employee ID, login email and temporary password was sent (they change it at first sign-in). A KYC request went to their chat.`;
       await sb.rpc("log_audit", {
         p_action: "employee.welcome_sent",
         p_entity: "employee",
@@ -349,7 +372,7 @@ export async function issueEmployeeLetter(fd: FormData) {
   const { data: employee } = await sb
     .from("employees")
     .select(
-      "id,employee_code,full_name,designation,joining_date,employment_type,status,department:departments(name),organization:organizations(name)",
+      "id,employee_code,full_name,designation,joining_date,employment_type,status,department:departments!department_id(name),organization:organizations(name)",
     )
     .eq("id", employeeId)
     .maybeSingle();
@@ -393,4 +416,23 @@ export async function revokeEmployeeLetter(fd: FormData) {
   const { error } = await (await supabaseServer()).rpc("revoke_employee_letter", { p_letter_id: id });
   if (error) flash(`/people/${employeeId}?tab=letters`, "err", dbMessage(error));
   flash(`/people/${employeeId}?tab=letters`, "ok", "Letter revoked and audit event recorded.");
+}
+
+/** Super Admin only: make an Admin the co-owner (max 2 owners incl. the Super Admin — the DB enforces it). */
+export async function setOwner(fd: FormData) {
+  const ctx = await requireContext();
+  const id = z.string().uuid().safeParse(fd.get("id"));
+  if (!id.success) flash("/people", "err", "Unknown person.");
+  if (ctx.role !== "SUPER_ADMIN") flash(`/people/${id.data}`, "err", "Only the Super Admin can choose the co-owner.");
+  const owner = fd.get("owner") === "1";
+  const sb = await supabaseServer();
+  const { error } = await sb.from("employees").update({ is_owner: owner }).eq("id", id.data);
+  if (error) flash(`/people/${id.data}`, "err", dbMessage(error));
+  await sb.rpc("log_audit", {
+    p_action: owner ? "owner.added" : "owner.removed",
+    p_entity: "employee",
+    p_entity_id: id.data,
+    p_metadata: {},
+  });
+  flash(`/people/${id.data}`, "ok", owner ? "They are now co-owner with full access." : "Co-owner access removed.");
 }

@@ -4,7 +4,7 @@ import { supabaseServer } from "@/lib/supabase/server";
 import { go, msg, sameOrigin } from "@/lib/auth-forms";
 import { allow, clientIp } from "@/lib/rate-limit";
 
-const Creds = z.object({ email: z.string().trim().toLowerCase().email(), password: z.string().min(8).max(200) });
+const Creds = z.object({ email: z.string().trim().toLowerCase().email(), password: z.string().trim().min(8).max(200) }); // passwords can't start/end with a space; trims copy-paste
 
 export async function POST(req: NextRequest) {
   if (!sameOrigin(req)) return go(req, msg("/login", "err", "Please sign in from the VSM Ops page."));
@@ -27,7 +27,11 @@ export async function POST(req: NextRequest) {
         msg(
           "/login",
           "err",
-          error.status === 429 ? "Too many attempts. Wait a few minutes and try again." : "Incorrect email or password.",
+          error.status === 429
+            ? "Too many attempts. Wait a few minutes and try again."
+            : error.code === "email_not_confirmed"
+              ? "This login isn't activated yet. Ask HR to send you a new password from your profile."
+              : "Incorrect email or password. If HR sent you several emails, use the password from the newest one.",
         ),
       );
   } catch {

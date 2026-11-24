@@ -51,7 +51,7 @@ export default async function ChatConversation({
         <p className="mb-3 text-sm text-muted">
           You are viewing this conversation in read-only moderation mode. You have not joined the channel.
         </p>
-        <ChatRoom channelId={id} employeeId={ctx.employee_id} employeeName={ctx.full_name} readOnly />
+        <ChatRoom channelId={id} employeeId={ctx.employee_id} employeeName={ctx.full_name} orgId={ctx.org_id} readOnly />
       </>
     );
   if (!membership)
@@ -89,7 +89,10 @@ export default async function ChatConversation({
       <div className="mb-3 flex flex-wrap items-center gap-2">
         {(members ?? []).map((m: any) => (
           <span key={m.employee_id} className="rounded-full border border-line px-2.5 py-1 text-[11px] text-muted">
-            {(directory ?? []).find((e: any) => e.id === m.employee_id)?.full_name ?? "Member"} · {m.member_role.toLowerCase()}
+            <Link href={`/people/${m.employee_id}`} className="text-ink hover:text-volt">
+              {(directory ?? []).find((e: any) => e.id === m.employee_id)?.full_name ?? "Member"}
+            </Link>{" "}
+            · {m.member_role.toLowerCase()}
             {m.last_read_at
               ? ` · read ${new Date(m.last_read_at).toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" })}`
               : " · not read yet"}
@@ -164,7 +167,7 @@ export default async function ChatConversation({
           <button className="text-xs text-muted underline">Leave channel</button>
         </form>
       ) : null}
-      <ChatRoom channelId={id} employeeId={ctx.employee_id} employeeName={ctx.full_name} />
+      <ChatRoom channelId={id} employeeId={ctx.employee_id} employeeName={ctx.full_name} orgId={ctx.org_id} />
     </>
   );
 }

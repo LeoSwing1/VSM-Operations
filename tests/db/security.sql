@@ -875,6 +875,305 @@ select t_ok((select count(*) from scholar_students) = 1, 'trainers see students 
 reset role;
 select set_config('request.jwt.claim.sub', '', false);
 
+-- Blocks 25–27
+-- ===========================================================================
+-- Block 25: OKRs
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_denied(format($$insert into okr_objectives(org_id,title,level,owner_id,period_start,period_end,created_by) values (%L,'Grow revenue 30%%','COMPANY',%L,'2027-01-01','2027-03-31',%L)$$, :'org', :'e_a', :'e_a'), 'employees cannot create company OKRs');
+insert into okr_objectives(org_id,title,level,owner_id,period_start,period_end,created_by)
+values (:'org','Ship 20 SEO audits','PERSONAL',:'e_a','2027-01-01','2027-03-31',:'e_a') returning id as obj_a \gset
+insert into okr_key_results(org_id, objective_id, title, start_value, target_value, owner_id) values (:'org', :'obj_a', 'Audits shipped', 0, 20, :'e_a') returning id as kr_a \gset
+select okr_checkin(:'kr_a', 5, 'ON_TRACK', 'Week 2');
+select t_ok(okr_objective_progress(:'obj_a') = 25, 'check-in moves the key result and objective progress (5/20 = 25%)');
+select t_ok(okr_kr_progress(100, 60, 80) = 50, 'lower-is-better key results progress correctly');
+reset role;
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((select count(*) from okr_objectives where id = :'obj_a') = 0, 'a colleague cannot see someone else''s personal OKR');
+select t_denied(format($$select okr_checkin(%L, 20, 'ON_TRACK')$$, :'kr_a'), 'a colleague cannot check in on someone else''s key result');
+reset role;
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select t_ok((select count(*) from okr_objectives where id = :'obj_a') = 1, 'the manager sees their report''s personal OKR');
+reset role;
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+insert into okr_objectives(org_id,title,level,owner_id,period_start,period_end,created_by)
+values (:'org','Become the #1 agency in Meerut','COMPANY',:'e_s','2027-01-01','2027-03-31',:'e_s') returning id as obj_c \gset
+reset role;
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((select count(*) from okr_objectives where id = :'obj_c') = 1, 'company OKRs are visible to everyone');
+reset role;
+
+-- Block 25: KPIs
+select set_config('request.jwt.claim.sub', '', false);
+select t_ok((select count(*) from kpi_definitions k join designations d on d.id = k.designation_id where k.org_id = :'org' and d.title = 'SEO Executive') >= 4, 'KPIs are seeded from each post''s KPI list');
+select t_ok((select source from kpi_definitions k join designations d on d.id = k.designation_id where k.org_id = :'org' and d.title = 'Course Counsellor' and k.name = 'Admissions') = 'SCHOLAR_ADMISSIONS', 'counsellor admissions are calculated automatically');
+update scholar_students set counsellor_id = :'e_b' where id = :'stu'; -- the app sets this on every new student
+select kpi_refresh(:'org') as kpi_n \gset
+select t_ok((select value from kpi_values v join kpi_definitions k on k.id = v.kpi_id where v.employee_id = :'e_b' and k.name = 'Admissions') = 1, 'auto KPI counts the enrolment Bhavna made this month');
+select k.id as kpi_manual from kpi_definitions k join designations d on d.id = k.designation_id where k.org_id = :'org' and d.title = 'Course Counsellor' and k.source = 'MANUAL' limit 1 \gset
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_denied(format($$select kpi_refresh(%L)$$, :'org'), 'employees cannot recalculate KPIs');
+select t_denied(format($$insert into kpi_values(org_id,kpi_id,employee_id,period_month,value,source,entered_by) values (%L,%L,%L,date_trunc('month',current_date)::date,99,'AUTO',%L)$$, :'org', :'kpi_manual', :'e_b', :'e_b'), 'nobody can write an AUTO value by hand');
+insert into kpi_values(org_id,kpi_id,employee_id,period_month,value,entered_by) values (:'org', :'kpi_manual', :'e_b', date_trunc('month',current_date)::date, 3, :'e_b') returning id as kv \gset
+select t_denied(format($$select kpi_verify(%L)$$, :'kv'), 'nobody verifies their own KPI');
+reset role;
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok((select count(*) from kpi_values where employee_id = :'e_b') = 0, 'colleagues cannot see each other''s KPI values');
+select t_denied(format($$select kpi_verify(%L)$$, :'kv'), 'a colleague cannot verify it');
+reset role;
+select set_config('request.jwt.claim.sub', :'O', false); set role authenticated;
+select kpi_verify(:'kv');
+select t_denied(format($$update kpi_values set value = 50 where id = %L$$, :'kv'), 'verified KPI values are locked');
+reset role;
+
+-- Block 25: 360° reviews
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_denied(format($$insert into review_cycles(org_id,name,period_start,period_end,created_by) values (%L,'Q1 2027','2027-01-01','2027-03-31',%L)$$, :'org', :'e_a'), 'employees cannot create review cycles');
+reset role;
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+insert into review_cycles(org_id,name,period_start,period_end,created_by,peers_per_person) values (:'org','Q1 2027 360','2027-01-01','2027-03-31',:'e_h',2) returning id as cyc \gset
+select review_cycle_open(:'cyc') > 0 as opened \gset
+reset role;
+select t_ok((select count(*) from review_assignments where cycle_id = :'cyc' and subject_id = :'e_a' and relation in ('SELF','MANAGER')) = 2, 'cycle creates self + manager reviews');
+select t_ok((select count(*) from review_assignments where cycle_id = :'cyc' and subject_id = :'e_m' and relation = 'REPORT' and reviewer_id = :'e_a') = 1, 'reports review their manager (upward feedback)');
+select id as ra_self from review_assignments where cycle_id = :'cyc' and subject_id = :'e_a' and relation = 'SELF' \gset
+select id as ra_mgr from review_assignments where cycle_id = :'cyc' and subject_id = :'e_a' and relation = 'MANAGER' \gset
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_denied(format($$select review_submit(%L, '{"quality":5}', 'Great', null)$$, :'ra_self'), 'every question must be rated 1–5');
+select review_submit(:'ra_self', '{"quality":4,"ownership":4,"communication":3,"teamwork":5,"growth":4}', 'Consistent audits', 'Speak up more');
+select t_denied(format($$select review_submit(%L, '{"quality":1,"ownership":1,"communication":1,"teamwork":1,"growth":1}', 'x x x', null)$$, :'ra_mgr'), 'nobody can fill the manager''s form about themselves');
+select t_ok((select count(*) from review_assignments) = (select count(*) from review_assignments where reviewer_id = :'e_a'), 'reviewers see only their own forms');
+select t_denied(format($$select review_summary(%L, %L)$$, :'cyc', :'e_a'), 'the subject cannot see their summary while the cycle is open');
+reset role;
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select review_submit(:'ra_mgr', '{"quality":5,"ownership":4,"communication":4,"teamwork":4,"growth":5}', 'Owns client audits end to end', null);
+select t_ok((review_summary(:'cyc', :'e_a') -> 'by_relation' -> 'MANAGER' ->> 'quality')::numeric = 5, 'the manager sees the summary for their report');
+reset role;
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_denied(format($$select review_summary(%L, %L)$$, :'cyc', :'e_a'), 'colleagues cannot see someone else''s 360 summary');
+reset role;
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select review_cycle_close(:'cyc');
+reset role;
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok((review_summary(:'cyc', :'e_a') ->> 'responses')::int = 2, 'after closing, the subject sees their own summary');
+reset role;
+
+-- Block 25: training records
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+insert into training_records(org_id, employee_id, title, provider, kind, status, started_on, completed_on, hours, created_by)
+values (:'org', :'e_a', 'Google Analytics 4 certification', 'Google Skillshop', 'CERTIFICATION', 'COMPLETED', current_date - 10, current_date, 12, :'e_a') returning id as tr \gset
+select t_denied(format($$select training_verify(%L)$$, :'tr'), 'nobody verifies their own training');
+reset role;
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((select count(*) from training_records where employee_id = :'e_a') = 0, 'colleagues cannot see each other''s training');
+reset role;
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select training_verify(:'tr');
+reset role;
+select t_ok((select verified_by = :'e_m' from training_records where id = :'tr'), 'the manager verifies completed training');
+
+-- Block 26: AI assistant
+select set_config('request.jwt.claim.sub', '', false);
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok((ai_quota() ->> 'allowed')::boolean = false and ai_quota() ->> 'reason' like '%switched off%', 'AI is off until an admin enables it');
+select t_denied($$update ai_settings set enabled = true$$, 'employees cannot switch the AI on');
+select t_denied($$insert into ai_usage(org_id, employee_id, feature, model) values (current_org_id(), current_employee_id(), 'ASK', 'x')$$, 'usage rows cannot be written directly');
+reset role;
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+update ai_settings set enabled = true, per_user_daily_requests = 2 where org_id = :'org';
+reset role;
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok((ai_quota() ->> 'allowed')::boolean, 'once enabled, employees with ai.use can ask');
+select ai_record_usage('ASK', 'claude-sonnet-5-5', 1200, 300, 2, true);
+select ai_record_usage('ASK', 'claude-sonnet-5-5', 900, 200, 0, true);
+select t_ok((ai_quota() ->> 'allowed')::boolean = false and ai_quota() ->> 'reason' like '%today%', 'the per-person daily limit is enforced');
+reset role;
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((select count(*) from ai_usage) = 0, 'people see only their own AI usage');
+reset role;
+
+-- Block 27: reports
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_denied(format($$select report_data(%L, 'PNL_MONTHLY', '2026-11-01', '2026-11-30')$$, :'org'), 'employees cannot run the P&L report');
+select t_denied(format($$select report_request('ATTENDANCE_SUMMARY', 'XLSX', '2026-11-01', '2026-11-30')$$), 'employees cannot request the attendance report');
+select t_denied(format($$select accountant_pack(%L, '2026-11-01', '2026-11-30')$$, :'org'), 'employees cannot download the accountant pack');
+select t_denied(format($$insert into report_schedules(org_id,name,report_type,frequency,recipients,created_by) values (%L,'Daily P&L','PNL_MONTHLY','DAILY',array[%L]::uuid[],%L)$$, :'org', :'e_a', :'e_a'), 'employees cannot schedule reports');
+reset role;
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_ok((report_data(:'org', 'ATTENDANCE_SUMMARY', current_date - 7, current_date) -> 'columns' ->> 0) = 'Employee ID', 'HR can run the attendance summary');
+select t_denied(format($$insert into report_schedules(org_id,name,report_type,frequency,recipients,created_by) values (%L,'Monthly P&L','PNL_MONTHLY','MONTHLY',array[%L]::uuid[],%L)$$, :'org', :'e_h', :'e_h'), 'HR cannot schedule a finance report they cannot see');
+insert into report_schedules(org_id,name,report_type,format,frequency,weekday,hour_local,recipients,created_by)
+values (:'org','Weekly attendance','ATTENDANCE_SUMMARY','XLSX','WEEKLY',1,9,array[:'e_h', :'e_a']::uuid[],:'e_h') returning id as sched \gset
+select t_ok((select extract(isodow from next_run_at at time zone 'Asia/Kolkata') = 1 and extract(hour from next_run_at at time zone 'Asia/Kolkata') = 9 from report_schedules where id = :'sched'), 'weekly schedule lands on Monday 09:00 IST');
+reset role;
+select set_config('request.jwt.claim.sub', '', false);
+select t_ok((select p_start = '2026-11-16' and p_end = '2026-11-22' from report_period('WEEKLY', '2026-11-23 03:30+00', 'Asia/Kolkata')), 'a Monday run covers last Monday–Sunday');
+select t_ok((select p_start = '2026-10-01' and p_end = '2026-10-31' from report_period('MONTHLY', '2026-11-01 03:30+00', 'Asia/Kolkata')), 'a monthly run covers the previous calendar month');
+update report_schedules set next_run_at = now() - interval '1 minute' where id = :'sched';
+select claim_due_reports(10) as claimed \gset
+select t_ok(:claimed = 1 and (select next_run_at > now() from report_schedules where id = :'sched'), 'the scheduler queues due reports and moves the next run forward');
+select id as run from report_runs where schedule_id = :'sched' \gset
+select t_ok(report_run_finished(:'run', true, :'org' || '/' || :'run' || '.xlsx', 7, null) = 1, 'only recipients who still hold the permission are notified (Aman is skipped)');
+select t_ok((select count(*) from email_outbox where template = 'report.ready' and payload ->> 'run_id' = :'run' and payload::text !~ '[0-9]{4,}\.[0-9]{2}') = 1, 'the report email carries a link, not figures');
+select t_ok((report_data(:'org', 'PNL_MONTHLY', '2026-11-01', '2026-11-30') -> 'rows' -> -1 ->> 0) = 'Result', 'P&L ends with the operating result line (service role)');
+select t_ok(jsonb_array_length(accountant_pack(:'org', '2026-11-01', '2026-11-30') -> 'Payroll totals') >= 1, 'accountant pack builds all sheets');
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok((select count(*) from report_runs) = 0, 'employees cannot list report files they have no right to');
+reset role;
+select set_config('request.jwt.claim.sub', '', false);
+
+-- 0035: owners, who can add whom, groups, KYC, profile cards
+-- ===========================================================================
+reset role; select set_config('request.jwt.claim.sub', '', false);
+select id as e_d2 from employees where official_email = 'admin@vsm.test' \gset
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_denied(format($$update employees set is_owner = true where id = %L$$, :'e_d2'), 'only the Super Admin can choose the co-owner');
+reset role;
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+update employees set is_owner = true where id = :'e_d2';
+select t_denied(format($$update employees set is_owner = true where id = %L$$, :'e_h'), 'a co-owner must be an Admin');
+reset role;
+\set D3 '11111111-0000-0000-0000-0000000000d3'
+insert into auth.users(id, email) values (:'D3', 'admin3@vsm.test');
+insert into employees(org_id, user_id, full_name, official_email, role) values (:'org', :'D3', 'Third Admin', 'admin3@vsm.test', 'ADMIN');
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select t_denied($$update employees set is_owner = true where official_email = 'admin3@vsm.test'$$, 'there can only be 2 owners');
+reset role;
+select set_config('request.jwt.claim.sub', :'D', false); set role authenticated;
+select t_ok(has_perm('payroll.manage') and has_perm('kyc.verify') and (my_context() ->> 'is_owner')::boolean and my_context() -> 'permissions' ? '*', 'the co-owner has full access like the Super Admin');
+reset role;
+
+-- Who can add whom
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_denied(format($$insert into employees(org_id, full_name, official_email, role) values (%L, 'Nope', 'nope@vsm.test', 'INTERN')$$, :'org'), 'employees cannot add anyone');
+select t_denied(format($$delete from employees where id = %L$$, :'e_b'), 'employees cannot delete anyone');
+reset role;
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+insert into employees(org_id, full_name, official_email, role, manager_id, designation) values (:'org', 'Sonu SEO', 'sonu@vsm.test', 'EMPLOYEE', :'e_m', 'SEO Executive');
+reset role;
+select t_ok((select count(*) from kyc_profiles k join employees e on e.id = k.employee_id where e.official_email = 'sonu@vsm.test') = 1, 'a manager adds an executive to their own team; KYC form is created');
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select t_denied(format($$insert into employees(org_id, full_name, official_email, role, manager_id) values (%L, 'Other', 'other1@vsm.test', 'EMPLOYEE', %L)$$, :'org', :'e_o'), 'managers can only add people who report to them');
+select t_denied(format($$insert into employees(org_id, full_name, official_email, role, manager_id) values (%L, 'Lead', 'lead2@vsm.test', 'TEAM_LEAD', %L)$$, :'org', :'e_m'), 'managers cannot add managers');
+select t_denied(format($$delete from employees where official_email = 'sonu@vsm.test'$$), 'managers cannot delete people either');
+reset role;
+select t_ok((select count(*) from chat_messages m join chat_channels c on c.id = m.channel_id where c.channel_type = 'DIRECT' and m.author_id = :'e_m'
+             and m.body like '%KYC%' and exists (select 1 from chat_channel_members x join employees e on e.id = x.employee_id where x.channel_id = c.id and e.official_email = 'sonu@vsm.test')) = 1,
+  'new joiners get an automatic chat message asking for KYC');
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+insert into employees(org_id, full_name, official_email, role) values (:'org', 'Mona Manager', 'mona@vsm.test', 'DEPARTMENT_MANAGER');
+select t_ok((select count(*) from employees where official_email = 'mona@vsm.test') = 1, 'HR Manager adds a manager');
+select t_denied(format($$insert into employees(org_id, full_name, official_email, role) values (%L, 'Big', 'big@vsm.test', 'ADMIN')$$, :'org'), 'HR Manager cannot add an Admin');
+select t_denied(format($$insert into employees(org_id, full_name, official_email, role, is_owner) values (%L, 'Own', 'own@vsm.test', 'EMPLOYEE', true)$$, :'org'), 'nobody adds an owner');
+reset role;
+insert into designations(org_id, title, grants) values (:'org', 'HR Executive', array['people.onboard','people.view_all']) on conflict do nothing;
+update designations set grants = array['people.onboard','people.view_all'] where org_id = :'org' and title = 'HR Executive';
+update employees set designation = 'HR Executive' where id = :'e_f';
+select set_config('request.jwt.claim.sub', :'F', false); set role authenticated;
+insert into employees(org_id, full_name, official_email, role) values (:'org', 'Isha Intern', 'isha@vsm.test', 'INTERN');
+select t_ok((select count(*) from employees where official_email = 'isha@vsm.test') = 1, 'the HR post onboards interns and executives');
+select t_denied(format($$insert into employees(org_id, full_name, official_email, role) values (%L, 'Mgr', 'mgr9@vsm.test', 'TEAM_LEAD')$$, :'org'), 'the HR post cannot add managers');
+select t_ok(not has_perm('kyc.verify'), 'a post can never grant KYC access');
+reset role;
+update employees set designation = null where id = :'e_f';
+
+-- Owners & admins are in every group
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+insert into chat_channels(org_id, name, channel_type, created_by) values (:'org', 'SEO war room', 'GROUP', :'e_m') returning id as grp \gset
+reset role;
+select t_ok((select count(*) from chat_channel_members where channel_id = :'grp' and employee_id in (:'e_s', :'e_d2')) = 2, 'Super Admin and co-owner join every new group automatically');
+
+-- Profile card
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((employee_card(:'e_s') ->> 'full_name') is not null and employee_card(:'e_s') ->> 'salary' is null, 'anyone can open a colleague''s basic profile card');
+reset role;
+
+-- KYC flow (Aman)
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+update kyc_profiles set date_of_birth = '1999-05-01', father_name = 'R A', personal_phone = '9876543210', current_address = 'Meerut',
+  permanent_address = 'Meerut', emergency_name = 'Mother', emergency_relation = 'Mother', emergency_phone = '9876543211',
+  pan = 'ABCDE1234F', aadhaar_last4 = '1234', bank_account_holder = 'Aman A', bank_account_no = '123456789012', bank_ifsc = 'HDFC0001234'
+ where employee_id = :'e_a';
+select t_denied($$update kyc_profiles set status = 'VERIFIED'$$, 'employees cannot mark their own KYC verified');
+select t_denied($$select kyc_submit()$$, 'submit is refused while documents/declaration are missing');
+insert into kyc_documents(org_id, employee_id, doc_type, storage_path, original_name, mime_type, size_bytes)
+select :'org', :'e_a', d, :'org' || '/' || :'e_a' || '/' || lower(d) || '.pdf', lower(d) || '.pdf', 'application/pdf', 1000 from unnest(kyc_required_docs()) d;
+select t_denied(format($$insert into kyc_documents(org_id, employee_id, doc_type, storage_path, original_name, mime_type, size_bytes) values (%L,%L,'PAN','x/y/z.pdf','z.pdf','application/pdf',10)$$, :'org', :'e_b'), 'nobody uploads into someone else''s KYC');
+select t_denied($$delete from kyc_documents$$, 'employees cannot delete uploaded documents');
+update kyc_profiles set declaration_accepted = true where employee_id = :'e_a';
+select kyc_submit();
+select t_ok((select status from kyc_profiles where employee_id = :'e_a') = 'SUBMITTED', 'complete KYC can be submitted');
+select t_denied($$update kyc_profiles set pan = 'ZZZZZ9999Z'$$, 'submitted KYC is locked for the employee');
+reset role;
+update kyc_profiles set pan = pan where employee_id = :'e_a';
+select t_ok((select pan from kyc_profiles where employee_id = :'e_a') = 'ABCDE1234F', 'the locked PAN did not change');
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok((select count(*) from kyc_profiles where employee_id = :'e_a') = 0, 'colleagues cannot see KYC');
+reset role;
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select t_ok((select count(*) from kyc_documents where employee_id = :'e_a') = 0, 'managers cannot see KYC documents');
+reset role;
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_denied(format($$select kyc_review(%L, 'VERIFIED')$$, :'e_a'), 'HR must verify each document before the KYC');
+select kyc_review_document(id, 'VERIFIED') from kyc_documents where employee_id = :'e_a';
+select kyc_review(:'e_a', 'VERIFIED', 'All good');
+reset role;
+select t_ok((select status = 'VERIFIED' and reviewed_by = :'e_h' from kyc_profiles where employee_id = :'e_a'), 'HR verifies the KYC');
+select t_ok((select pan is not null and bank_ifsc is not null from employee_statutory where employee_id = :'e_a'), 'verified PAN and bank details reach payroll');
+insert into kyc_profiles(employee_id, org_id) values (:'e_h', :'org') on conflict do nothing;
+insert into kyc_documents(org_id, employee_id, doc_type, storage_path, original_name, mime_type, size_bytes)
+values (:'org', :'e_h', 'PAN', :'org' || '/' || :'e_h' || '/pan.pdf', 'pan.pdf', 'application/pdf', 100);
+select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
+select t_denied(format($$select kyc_review_document(id, 'VERIFIED') from kyc_documents where employee_id = %L limit 1$$, :'e_h'), 'HR cannot verify their own KYC');
+reset role;
+
+-- Employees cannot delete company records: try every table as an employee, roll each attempt back.
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+do $$
+declare r record; n int; hits text[] := '{}';
+begin
+  for r in select c.relname from pg_class c join pg_namespace s on s.oid = c.relnamespace
+            where s.nspname = 'public' and c.relkind = 'r' and c.relname not like '\_%' order by 1 loop
+    begin
+      execute format('delete from public.%I', r.relname);
+      get diagnostics n = row_count;
+      raise exception 'deleted:%', n;
+    exception when others then
+      if sqlerrm like 'deleted:%' and split_part(sqlerrm, ':', 2)::int > 0 then hits := hits || (r.relname || '(' || split_part(sqlerrm, ':', 2) || ')'); end if;
+    end;
+  end loop;
+  perform t_ok(not exists (select 1 from unnest(hits) h where split_part(h, '(', 1) not in ('notification_preferences','push_subscriptions','whatsapp_optins')),
+    'employees can delete nothing except their own notification/push/WhatsApp settings: ' || array_to_string(hits, ', '));
+end $$;
+reset role;
+select set_config('request.jwt.claim.sub', '', false);
+
+-- 0036: duplicate lookup names the existing person, only for people who can add employees
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select t_ok((find_employee_conflict('SONU@vsm.test', '') ->> 'full_name') = 'Sonu SEO' and (find_employee_conflict('SONU@vsm.test', '') ->> 'field') = 'email', 'adding a duplicate email names who already has it');
+reset role;
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok(find_employee_conflict('sonu@vsm.test', '') is null, 'people who cannot add employees learn nothing from the lookup');
+reset role;
+select set_config('request.jwt.claim.sub', '', false);
+
+-- 0038: login lookup is server-only
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select t_denied($$select auth_login_for_email('a@vsm.test')$$, 'the login lookup cannot be called from the app, even by the Super Admin');
+reset role;
+select set_config('request.jwt.claim.sub', '', false);
+select t_ok((auth_login_for_email('A@VSM.TEST') ->> 'employee_name') = 'Aman A', 'the server finds an existing login by email (case-insensitive)');
+
+-- 0039: any file type up to 50 MB, delivered ticks
+select t_ok((select allowed_mime_types is null and file_size_limit = 52428800 from storage.buckets where id = 'chat-files'), 'chat files: any type, up to 50 MB');
+select t_ok(not exists (select 1 from pg_constraint where conrelid = 'chat_attachments'::regclass and pg_get_constraintdef(oid) ilike '%application/zip%'), 'no file-type whitelist left on chat attachments');
+select t_denied($$insert into chat_attachments(org_id, channel_id, message_id, uploaded_by, storage_path, file_name, mime_type, file_size) values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x', 'big.mov', 'video/quicktime', 60000000)$$, 'files over 50 MB are refused');
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select chat_mark_delivered();
+reset role;
+select t_ok((select count(*) from chat_channel_members where employee_id = :'e_b' and last_delivered_at > now() - interval '1 minute') = (select count(*) from chat_channel_members where employee_id = :'e_b'), 'opening the app marks your chats delivered');
+select set_config('request.jwt.claim.sub', '', false);
+
 -- Smoke: every public table is readable (subject to RLS) by every persona without policy errors.
 create or replace function t_sweep(label text) returns void language plpgsql as $$
 declare t record; n int;

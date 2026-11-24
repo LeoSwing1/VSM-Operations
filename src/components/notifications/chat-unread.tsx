@@ -34,7 +34,9 @@ export function ChatUnread({ employeeId }: { employeeId: string }) {
     );
     const onFocus = () => refresh();
     window.addEventListener("focus", onFocus);
+    const beat = window.setInterval(() => document.visibilityState === "visible" && refresh(), 30000);
     return () => {
+      window.clearInterval(beat);
       stop();
       window.removeEventListener("focus", onFocus);
     };
