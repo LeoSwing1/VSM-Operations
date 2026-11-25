@@ -1,4 +1,5 @@
 "use server";
+import { appUrl } from "@/lib/app-url";
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { requireContext } from "@/lib/auth";
@@ -45,7 +46,7 @@ export async function testLogin(_p: TestState, fd: FormData): Promise<TestState>
 /** Sends a real reset email to the Super Admin's own inbox, through the same path employees use. */
 export async function testResetEmail(_p: TestState, _fd: FormData): Promise<TestState> {
   const ctx = await sa();
-  const redirectTo = `${process.env.APP_URL ?? ""}/auth/callback?next=/login/reset`;
+  const redirectTo = `${appUrl()}/auth/callback?next=/login/reset`;
   const t = Date.now();
   try {
     const provider = await getProvider();

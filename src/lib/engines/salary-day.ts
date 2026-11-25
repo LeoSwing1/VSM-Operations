@@ -23,3 +23,25 @@ export function ordinal(n: number): string {
   const s = n % 100 >= 11 && n % 100 <= 13 ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th");
   return `${n}${s}`;
 }
+
+const addDays = (iso: string, n: number) => {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+
+/** First salary date after joining (joins 1 Jan with the default 8th → 8 Jan). */
+export function firstSalaryDate(day: number, joining: string): string {
+  return nextSalaryDate(day, addDays(joining, 1));
+}
+
+/** "8 Jan 2027" */
+export function longDate(iso: string): string {
+  return new Date(iso + "T00:00:00Z").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+}
+
+/** "8th of every month · first salary 8 Jan 2027" */
+export function salaryLabel(day: number | null | undefined, joining: string | null | undefined): string | null {
+  if (!day || !joining) return null;
+  return `${ordinal(day)} of every month · first salary ${longDate(firstSalaryDate(day, joining))}`;
+}

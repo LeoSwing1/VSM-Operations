@@ -1,3 +1,4 @@
+import { appUrl } from "@/lib/app-url";
 /**
  * Email templates — HTML + plain text. Salary emails NEVER contain amounts: they link to the
  * authenticated payslip page. Every value is escaped.
@@ -11,7 +12,7 @@ type P = Record<string, unknown>;
 
 const esc = (v: unknown) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
-const app = () => process.env.APP_URL ?? "https://ops.vsmgrowth.com";
+const app = () => appUrl();
 
 function layout(title: string, body: string, cta?: { label: string; href: string }) {
   return `<!doctype html><html><body style="margin:0;background:#0b0b0c;font-family:Arial,Helvetica,sans-serif;color:#f4f4f2">
@@ -20,7 +21,7 @@ function layout(title: string, body: string, cta?: { label: string; href: string
 <tr><td style="padding:28px 32px 8px;font-size:12px;letter-spacing:.2em;text-transform:uppercase;color:#D7FF3A">VSM Growth Operations</td></tr>
 <tr><td style="padding:0 32px;font-size:26px;line-height:1.2;font-family:Georgia,serif">${esc(title)}</td></tr>
 <tr><td style="padding:16px 32px 8px;font-size:15px;line-height:1.6;color:#c9c9c4">${body}</td></tr>
-${cta ? `<tr><td style="padding:16px 32px 28px"><a href="${esc(cta.href)}" style="display:inline-block;background:#D7FF3A;color:#0b0b0c;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:999px">${esc(cta.label)}</a></td></tr>` : ""}
+${cta ? `<tr><td style="padding:16px 32px 28px"><a href="${esc(cta.href)}" style="display:inline-block;background:#D7FF3A;color:#0b0b0c;text-decoration:none;font-weight:bold;padding:12px 20px;border-radius:999px">${esc(cta.label)}</a><p style="margin:12px 0 0;font-size:12px;color:#7a7a76">Button not working? Open <a href="${esc(cta.href)}" style="color:#D7FF3A">${esc(cta.href.length > 70 ? app() + "/login" : cta.href)}</a></p></td></tr>` : ""}
 <tr><td style="padding:16px 32px 28px;font-size:12px;color:#7a7a76;border-top:1px solid #2a2a2e">VSM Growth · Meerut & Noida · vsmgrowth.com<br>You're receiving this because of your VSM Growth account or enquiry.</td></tr>
 </table></td></tr></table></body></html>`;
 }
@@ -144,7 +145,9 @@ templates["employee.welcome"] = (p) => ({
         ["Department", p.department],
         ["Team", p.team],
         ["Reports to", p.manager],
-        ["Joining date", p.joining],
+        ["Joining date", p.joining_label ?? p.joining],
+        ["Salary date", p.salary_label],
+        ["Login page", `${app()}/login`],
         ["Login email", p.email],
         ["Temporary password", p.password],
       ]) +
@@ -153,9 +156,9 @@ templates["employee.welcome"] = (p) => ({
         : `<p style="color:#c9c9c4">Click the button to set your password. The link works once and expires in 24 hours.</p>`) +
       `<p style="color:#c9c9c4"><b>First task:</b> complete your KYC (Menu → My KYC) — fill the form and upload your documents so HR can verify them.</p>` +
       `<p style="color:#7a7a76;font-size:13px">On day one: clock in from the Attendance page, turn on desktop notifications, and say hi in your team chat.</p>`,
-    { label: p.password ? "Sign in to VSM Ops" : "Set my password", href: String(p.link || `${app()}/login`) },
+    { label: p.password ? "Log in to VSM Operations" : "Set my password", href: String(p.link || `${app()}/login`) },
   ),
-  text: `Welcome to VSM Growth, ${p.name}.\nEmployee ID: ${p.code}\nPost: ${p.post ?? "-"}\nLogin email: ${p.email}\n${
+  text: `Welcome to VSM Growth, ${p.name}.\nEmployee ID: ${p.code}\nPost: ${p.post ?? "-"}\nJoining date: ${p.joining_label ?? p.joining ?? "-"}\nSalary date: ${p.salary_label ?? "-"}\nLogin page: ${app()}/login\nLogin email: ${p.email}\n${
     p.password
       ? `Temporary password: ${p.password} (you must change it at first sign-in)\nSign in: ${app()}/login`
       : `Set your password: ${p.link}`
@@ -172,7 +175,7 @@ templates["auth.new_password"] = (p) => ({
         ["Temporary password", p.password],
       ]) +
       `<p style="color:#c9c9c4">You'll be asked to choose your own password when you sign in. If you didn't expect this, tell HR.</p>`,
-    { label: "Sign in", href: `${app()}/login` },
+    { label: "Log in to VSM Operations", href: `${app()}/login` },
   ),
   text: `New temporary password for ${p.email}: ${p.password}\nSign in at ${app()}/login — you'll be asked to choose your own.`,
 });

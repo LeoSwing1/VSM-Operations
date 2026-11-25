@@ -1312,6 +1312,37 @@ select set_config('request.jwt.claim.sub', :'H', false); set role authenticated;
 select t_denied(format($$select asset_issue(%L, %L)$$, :'lap', :'e_kx'), 'kit cannot be issued to someone who has left');
 reset role;
 
+-- 0043: platform-wide activity log, chat-report alerts, English KYC message
+select t_ok((select count(*) from notifications n join employees e on e.id = n.recipient_id where n.link = '/settings/chat-moderation' and e.role = 'SUPER_ADMIN') >= 1, 'a reported chat message alerts the Super Admin');
+select t_ok(exists (select 1 from notifications where recipient_id = :'e_h' and link = '/settings/chat-moderation'), 'a reported chat message alerts the moderators');
+select t_ok(exists (select 1 from notifications where recipient_id = :'e_a' and title = 'Your chat report was reviewed'), 'the reporter hears back when the report is reviewed');
+select t_ok(exists (select 1 from audit_events where action = 'chat_messages.created' and actor_employee_id is not null), 'sending a chat message is logged (who and where)');
+select t_ok(not exists (select 1 from audit_events where action like 'chat_messages.%' and metadata::text ilike '%body%'), 'message text is never copied into the log');
+select t_ok(exists (select 1 from audit_events where action = 'tasks.updated' and metadata ? 'changed'), 'edits record which fields changed');
+select t_ok(exists (select 1 from audit_events where action = 'leads.created'), 'CRM leads are logged');
+select t_ok(exists (select 1 from audit_events where action = 'attendance_events.created'), 'clock-ins are logged');
+select t_ok(not exists (select 1 from audit_events where action like 'salary_structures.%' and metadata::text ~ '"(ctc|basic|gross|net)'), 'salary amounts never appear in the log');
+select t_ok((select count(*) from audit_events where action = 'employees.created') = 0, 'tables with their own audit trail are not logged twice');
+select t_ok(exists (select 1 from audit_events where metadata->>'source' = 'system'), 'database-side activity is labelled System');
+select set_config('request.jwt.claim.sub', '', false);
+select set_config('request.jwt.claims', '{"role":"service_role"}', false);
+insert into email_outbox(org_id, to_email, template, payload, dedupe_key) values (:'org', 'log-test@vsm.test', 'employee.welcome', '{}', 'log-test-1');
+select set_config('request.jwt.claims', '', false);
+select t_ok(exists (select 1 from audit_events where action = 'email_outbox.created' and metadata->>'source' = 'integration'), 'integration / cron activity is labelled Integration');
+select audit_auth_event('auth.sign_in_failed', 'A@VSM.TEST', '10.0.0.1', 'wrong password');
+select t_ok(exists (select 1 from audit_events where action = 'auth.sign_in_failed' and entity_id = :'e_a'), 'failed sign-ins are logged against the account');
+select audit_auth_event('auth.sign_in_failed', 'nobody@nowhere.test');
+select t_ok(not exists (select 1 from audit_events where action = 'auth.sign_in_failed' and metadata::text like '%nowhere%'), 'unknown emails are not logged');
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_none('select count(*) from audit_events', 'employees cannot read the activity log');
+select t_denied($$select audit_auth_event('auth.sign_in', 'a@vsm.test')$$, 'the app user cannot forge sign-in events');
+select t_denied($$insert into audit_events(org_id, action, entity) select org_id, 'fake', 'x' from employees limit 1$$, 'nobody can write log rows directly');
+reset role;
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select t_ok((select count(distinct coalesce(actor_employee_id::text, 'system')) from audit_events) >= 3, 'the Super Admin sees everyone''s activity, not just their own');
+reset role;
+select t_ok(exists (select 1 from pg_proc where proname = 'kyc_send_request' and prosrc like '%welcome to VSM!%' and prosrc not like '%kar do%'), 'the KYC request chat message is in English');
+
 -- Smoke: every public table is readable (subject to RLS) by every persona without policy errors.
 create or replace function t_sweep(label text) returns void language plpgsql as $$
 declare t record; n int;

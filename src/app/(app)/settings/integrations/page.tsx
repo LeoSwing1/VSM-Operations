@@ -1,3 +1,4 @@
+import { appUrl } from "@/lib/app-url";
 import { requirePerm } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
 import { Badge, Card, Flash, PageHeader, TableWrap } from "@/components/ui";
@@ -249,7 +250,7 @@ export default async function Integrations({ searchParams }: { searchParams: Pro
                 <p className="mt-3 text-xs text-muted">No user calendar accounts are linked to this organisation yet.</p>
               )}
               <p className="mt-3 text-xs text-muted">
-                Redirect URI: {process.env.APP_URL ?? "APP_URL missing"}/api/integrations/calendar/
+                Redirect URI: {appUrl()}/api/integrations/calendar/
                 {p.key === "GOOGLE" ? "google" : "microsoft"}/callback
               </p>
             </Card>

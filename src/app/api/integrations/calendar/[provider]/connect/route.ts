@@ -1,3 +1,4 @@
+import { appUrl } from "@/lib/app-url";
 import { NextResponse, type NextRequest } from "next/server";
 import { randomBytes } from "node:crypto";
 import { getContext } from "@/lib/auth";
@@ -12,7 +13,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ prov
     p === "google" ? (process.env.GOOGLE_CLIENT_ID ?? process.env.GOOGLE_CALENDAR_CLIENT_ID) : process.env.MICROSOFT_CALENDAR_CLIENT_ID;
   if (!client) return NextResponse.json({ error: `${p} calendar OAuth is not configured` }, { status: 503 });
   const state = randomBytes(32).toString("base64url"),
-    redirect = new URL(`/api/integrations/calendar/${p}/callback`, process.env.APP_URL ?? req.nextUrl.origin).toString();
+    redirect = new URL(`/api/integrations/calendar/${p}/callback`, appUrl()).toString();
   // Google: ?services=calendar,drive,gmail (incremental — previously granted scopes are kept).
   const wanted = (req.nextUrl.searchParams.get("services") ?? "calendar").split(",");
   const googleScopes = [

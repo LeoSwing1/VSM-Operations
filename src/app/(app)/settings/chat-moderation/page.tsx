@@ -8,7 +8,7 @@ export default async function ChatModeration({ searchParams }: { searchParams: P
   const sp = await searchParams,
     ctx = await requirePerm("communication.moderate"),
     sb = await supabaseServer();
-  const [{ data: reports }, { data: events }] = await Promise.all([
+  const [{ data: reports }, { data: events }, { data: closed }] = await Promise.all([
     sb
       .from("chat_message_reports")
       .select("id,channel_id,message_id,reporter_id,reason,details,status,created_at,resolution")
@@ -20,6 +20,12 @@ export default async function ChatModeration({ searchParams }: { searchParams: P
       .select("id,action,channel_id,message_id,target_employee_id,details,created_at")
       .order("created_at", { ascending: false })
       .limit(30),
+    sb
+      .from("chat_message_reports")
+      .select("id,channel_id,reporter_id,reviewed_by,reason,status,created_at,reviewed_at,resolution")
+      .in("status", ["DISMISSED", "ACTIONED"])
+      .order("reviewed_at", { ascending: false })
+      .limit(50),
   ]);
   const ids = [...new Set((reports ?? []).map((r: any) => r.message_id))];
   const hiddenIds = [
@@ -36,6 +42,7 @@ export default async function ChatModeration({ searchParams }: { searchParams: P
       ...(reports ?? []).map((r: any) => r.reporter_id),
       ...(messages ?? []).map((m: any) => m.author_id),
       ...(hiddenMessages ?? []).map((m: any) => m.author_id),
+      ...(closed ?? []).flatMap((r: any) => [r.reporter_id, r.reviewed_by]).filter(Boolean),
     ]),
   ];
   const { data: people } = peopleIds.length ? await sb.from("employee_directory").select("id,full_name").in("id", peopleIds) : { data: [] };
@@ -51,7 +58,8 @@ export default async function ChatModeration({ searchParams }: { searchParams: P
       <Flash sp={sp} />
       <Card title="Reported messages">
         <p className="mb-4 text-sm text-muted">
-          Only users with communication.moderate can view this queue. Actions are recorded in the moderation audit trail.
+          Moderators, admins, owners and the Super Admin see this queue and are notified the moment a message is reported. Every action is
+          recorded in the moderation trail and the Audit log.
         </p>
         {!reports?.length ? (
           <Empty title="No open reports" hint="New message reports will appear here." />
@@ -107,7 +115,48 @@ export default async function ChatModeration({ searchParams }: { searchParams: P
           </div>
         )}
       </Card>
-      <Card title="Recent moderation activity">
+      <Card title="Closed reports" className="mt-6">
+        {!closed?.length ? (
+          <Empty title="No closed reports yet" />
+        ) : (
+          <TableWrap>
+            <table className="table min-w-[680px]">
+              <thead>
+                <tr>
+                  <th>Reported</th>
+                  <th>Reason</th>
+                  <th>Outcome</th>
+                  <th>Reviewed by</th>
+                </tr>
+              </thead>
+              <tbody>
+                {closed.map((r: any) => (
+                  <tr key={r.id}>
+                    <td className="text-xs">
+                      {new Date(r.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} · by {name(r.reporter_id)}
+                      <br />
+                      <Link className="text-volt" href={`/chat/${r.channel_id}`}>
+                        Open conversation →
+                      </Link>
+                    </td>
+                    <td>
+                      <Badge>{r.reason.replaceAll("_", " ")}</Badge>
+                    </td>
+                    <td className="text-xs">
+                      <Badge tone={r.status === "ACTIONED" ? "red" : undefined}>{r.status}</Badge> {r.resolution ?? ""}
+                    </td>
+                    <td className="text-xs text-muted">
+                      {r.reviewed_by ? name(r.reviewed_by) : "—"}
+                      {r.reviewed_at ? ` · ${new Date(r.reviewed_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}` : ""}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
+        )}
+      </Card>
+      <Card title="Recent moderation activity" className="mt-6">
         <TableWrap>
           <table className="table min-w-[600px]">
             <thead>

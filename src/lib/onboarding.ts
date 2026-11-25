@@ -1,8 +1,10 @@
+import { appUrl } from "@/lib/app-url";
 import "server-only";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { getProvider } from "@/lib/email/providers";
 import { render } from "@/lib/email/templates";
 import { temporaryPassword } from "@/lib/passwords";
+import { longDate, salaryLabel } from "@/lib/engines/salary-day";
 
 export type WelcomeMode = "link" | "password";
 
@@ -46,14 +48,14 @@ export async function sendWelcome(employeeId: string, mode: WelcomeMode): Promis
   const { data: e, error } = await admin
     .from("employees")
     .select(
-      "id, org_id, full_name, official_email, employee_code, designation, joining_date, role, user_id, department:departments!department_id(name), manager:employees!manager_id(full_name)",
+      "id, org_id, full_name, official_email, employee_code, designation, joining_date, salary_day, role, user_id, department:departments!department_id(name), manager:employees!manager_id(full_name)",
     )
     .eq("id", employeeId)
     .single();
   if (error || !e) throw new Error("Employee not found.");
   if (e.role === "SUPER_ADMIN") throw new Error("The Super Admin manages their own login.");
   const { data: team } = await admin.from("org_team_members").select("team:org_teams(name)").eq("employee_id", e.id).limit(1).maybeSingle();
-  const redirectTo = `${process.env.APP_URL ?? ""}/auth/callback?next=/login/reset`;
+  const redirectTo = `${appUrl()}/auth/callback?next=/login/reset`;
   let link = "",
     password = "";
   let userId = e.user_id as string | null;
@@ -134,6 +136,8 @@ export async function sendWelcome(employeeId: string, mode: WelcomeMode): Promis
     team: (team?.team as unknown as { name: string } | null)?.name,
     manager: (e.manager as unknown as { full_name: string } | null)?.full_name,
     joining: e.joining_date,
+    joining_label: e.joining_date ? longDate(e.joining_date) : null,
+    salary_label: salaryLabel(e.salary_day, e.joining_date),
     email: e.official_email,
     link,
     password,

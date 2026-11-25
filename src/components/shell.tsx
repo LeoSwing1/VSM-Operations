@@ -9,6 +9,7 @@ import type { AttendanceEvent } from "@/lib/engines/attendance";
 import Link from "next/link";
 import { can, canAny, ROLE_LABEL, type Ctx } from "@/lib/auth";
 import { NavLinks, ThemeToggle, MobileMenu } from "./shell-client";
+import { NotificationSound, SoundToggle } from "./notifications/sound";
 
 export interface NavItem {
   href: string;
@@ -159,13 +160,19 @@ export function Shell({ ctx, unread, today, children }: { ctx: Ctx; unread: numb
         <Link href="/dashboard" className="display text-2xl">
           VSM<span className="text-volt">.</span>
         </Link>
-        <MobileMenu>{sidebar}</MobileMenu>
+        <div className="flex items-center gap-2">
+          <ThemeToggle compact />
+          <MobileMenu>{sidebar}</MobileMenu>
+        </div>
       </div>
       <main id="main" className="mx-auto w-full min-w-0 max-w-[1400px] px-4 py-6 sm:px-8 lg:py-8">
         <Suspense fallback={null}>
           <ProgressBar />
         </Suspense>
-        <div className="no-print mb-6 flex items-center justify-end gap-3">
+        <div className="no-print mb-6 flex items-center justify-end gap-2 sm:gap-3">
+          <ThemeToggle compact />
+          <SoundToggle />
+          <NotificationSound employeeId={ctx.employee_id} />
           <ProfileMenu
             id={ctx.employee_id}
             name={ctx.full_name}

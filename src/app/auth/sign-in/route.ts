@@ -3,6 +3,7 @@ import { z } from "zod";
 import { supabaseServer } from "@/lib/supabase/server";
 import { go, msg, sameOrigin } from "@/lib/auth-forms";
 import { allow, clientIp } from "@/lib/rate-limit";
+import { logAuthEvent } from "@/lib/auth-audit";
 
 const Creds = z.object({ email: z.string().trim().toLowerCase().email(), password: z.string().trim().min(8).max(200) }); // passwords can't start/end with a space; trims copy-paste
 
@@ -20,6 +21,12 @@ export async function POST(req: NextRequest) {
   try {
     const sb = await supabaseServer();
     const { error } = await sb.auth.signInWithPassword(parsed.data);
+    await logAuthEvent(
+      error ? "auth.sign_in_failed" : "auth.sign_in",
+      parsed.data.email,
+      ip,
+      error ? (error.code ?? "rejected") : undefined,
+    );
     // Same message for unknown user / wrong password — no account enumeration.
     if (error)
       return go(

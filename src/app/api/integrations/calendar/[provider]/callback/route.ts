@@ -1,3 +1,4 @@
+import { appUrl } from "@/lib/app-url";
 import { NextResponse, type NextRequest } from "next/server";
 import { getContext } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase/admin";
@@ -12,8 +13,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ prov
     code = req.nextUrl.searchParams.get("code");
   const nextCookie = req.cookies.get(`vsm_calendar_next_${p}`)?.value ?? "/calendar";
   const back = /^\/(?![/\\])/.test(nextCookie) ? nextCookie.split("?")[0]! : "/calendar";
-  const fail = (msg: string) =>
-    NextResponse.redirect(new URL(`${back}?err=${encodeURIComponent(msg)}`, process.env.APP_URL ?? req.nextUrl.origin));
+  const fail = (msg: string) => NextResponse.redirect(new URL(`${back}?err=${encodeURIComponent(msg)}`, appUrl()));
   if (!state || !cookie || state !== cookie || !code) return fail("Calendar connection could not be verified.");
   const ctx = await getContext();
   if (!ctx) return NextResponse.redirect(new URL("/login", req.url));
@@ -24,7 +24,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ prov
       : process.env.MICROSOFT_CALENDAR_CLIENT_SECRET;
   if (!clientId || !secret || !process.env.CALENDAR_TOKEN_ENCRYPTION_KEY)
     return fail("Calendar OAuth credentials or token encryption key are not configured.");
-  const redirect = new URL(`/api/integrations/calendar/${p}/callback`, process.env.APP_URL ?? req.nextUrl.origin).toString(),
+  const redirect = new URL(`/api/integrations/calendar/${p}/callback`, appUrl()).toString(),
     tokenUrl = google ? "https://oauth2.googleapis.com/token" : "https://login.microsoftonline.com/common/oauth2/v2.0/token";
   try {
     const tokenRes = await fetch(tokenUrl, {
@@ -68,9 +68,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ prov
       { onConflict: "org_id,employee_id,provider" },
     );
     if (error) return fail("Calendar credentials could not be stored securely.");
-    const res = NextResponse.redirect(
-      new URL(`${back}?ok=${encodeURIComponent("Google connected.")}`, process.env.APP_URL ?? req.nextUrl.origin),
-    );
+    const res = NextResponse.redirect(new URL(`${back}?ok=${encodeURIComponent("Google connected.")}`, appUrl()));
     res.cookies.set(`vsm_calendar_state_${p}`, "", {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",

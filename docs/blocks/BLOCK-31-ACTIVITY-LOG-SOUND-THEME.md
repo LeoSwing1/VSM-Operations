@@ -1,0 +1,24 @@
+# Block 31 — Platform activity log, chat-report alerts, emails, theme & sound, salary dates (migration 0043)
+
+- **Audit log**:
+  - Covers every create / change / delete on every organisation table, plus sign-ins, sign-outs and failed sign-ins (with IP).
+  - Labelled by who did it: Person, Integration (service key: cron, email, calendar, webhooks) or System (automatic database work).
+  - Updates record which fields changed. Message text, documents and salary amounts are never copied.
+  - Admin → Audit log has filters (area, person/integration/system, dates, search), plain-English lines and a CSV download.
+  - Visible to everyone with `audit.view` (Super Admin, owners, Admin, HR Manager). Rows can't be edited or deleted.
+  - New migrations that add org tables must end with `select audit_attach_all();`.
+- **Chat reports**:
+  - Moderators, Admins, owners and the Super Admin get a notification the moment a message is reported.
+  - The reporter is told when it's reviewed. Chat moderation now also lists closed reports.
+- **Emails**:
+  - Every button and link uses `APP_URL`, falling back to the Vercel production domain, then https://vsm-operations.vercel.app.
+  - The welcome email has a "Log in to VSM Operations" button, the login page URL as plain text, the joining date and the salary date.
+- **KYC chat message** is in plain English.
+- **Header**:
+  - Light/Dark switch (☀️/🌙) on desktop and mobile; the accent colour is darkened for readability in light mode.
+  - Notification sound on/off (🔔/🔕) with a chime for chats and a ping for other alerts; only one tab plays.
+- **Salary dates**:
+  - The people list shows Joined and Salary date columns.
+  - A New joiners card (joined in the last 45 days or joining in the next 90) shows joining date → first salary date (1 Jan → 8 Jan).
+  - The profile Onboarding tab shows joining date, salary date and first salary.
+  - Payroll shows who is paid on which date in the next 35 days.

@@ -49,25 +49,42 @@ export function NavLinks({ items, unread, employeeId }: { items: NavItem[]; unre
   );
 }
 
-export function ThemeToggle() {
+export function ThemeToggle({ compact = false }: { compact?: boolean }) {
   const [light, setLight] = useState(false);
-  useEffect(() => setLight(document.documentElement.classList.contains("light")), []);
+  useEffect(() => {
+    const sync = () => setLight(document.documentElement.classList.contains("light"));
+    sync();
+    window.addEventListener("vsm-theme", sync);
+    return () => window.removeEventListener("vsm-theme", sync);
+  }, []);
+  const toggle = () => {
+    const next = !light;
+    setLight(next);
+    document.documentElement.classList.toggle("light", next);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    meta?.setAttribute("content", next ? "#ffffff" : "#0b0b0c");
+    try {
+      localStorage.setItem("vsm-theme", next ? "light" : "dark");
+    } catch {
+      /* storage unavailable */
+    }
+    window.dispatchEvent(new Event("vsm-theme")); // keep every toggle on the page in step
+  };
+  if (compact)
+    return (
+      <button
+        type="button"
+        onClick={toggle}
+        aria-label={light ? "Switch to dark mode" : "Switch to light mode"}
+        title={light ? "Switch to dark mode" : "Switch to light mode"}
+        className="flex h-9 items-center gap-1.5 rounded-full border border-line px-3 text-xs font-semibold hover:border-volt"
+      >
+        <span aria-hidden>{light ? "🌙" : "☀️"}</span>
+        <span className="hidden sm:inline">{light ? "Dark" : "Light"}</span>
+      </button>
+    );
   return (
-    <button
-      type="button"
-      aria-label="Toggle colour theme"
-      className="text-xs text-muted hover:text-ink"
-      onClick={() => {
-        const next = !light;
-        setLight(next);
-        document.documentElement.classList.toggle("light", next);
-        try {
-          localStorage.setItem("vsm-theme", next ? "light" : "dark");
-        } catch {
-          /* storage unavailable */
-        }
-      }}
-    >
+    <button type="button" aria-label="Toggle colour theme" className="text-xs text-muted hover:text-ink" onClick={toggle}>
       {light ? "Dark mode" : "Light mode"}
     </button>
   );

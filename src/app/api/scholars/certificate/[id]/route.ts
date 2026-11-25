@@ -1,3 +1,4 @@
+import { appUrl } from "@/lib/app-url";
 import { NextResponse, type NextRequest } from "next/server";
 import { requireContext } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
@@ -23,7 +24,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     student: { full_name: string };
     batch: { name: string; starts_on: string; ends_on: string | null; course: { name: string } };
   };
-  const base = process.env.APP_URL ?? req.nextUrl.origin;
+  const base = appUrl();
   const pdf = await certificatePdf({
     name: en.student.full_name,
     course: en.batch.course.name,

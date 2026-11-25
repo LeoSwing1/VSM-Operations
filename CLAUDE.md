@@ -144,3 +144,5 @@ Workflow rules are tenant-scoped and cannot execute arbitrary code. Events are i
 - Adding employees: `can_add_employee()` (people.manage / people.onboard / people.add_team with manager = self). Never grant DELETE on employees.
 - KYC: never store full Aadhaar (last 4 only). kyc.* is sensitive (no post grants). Docs only via signed URLs from the viewer's own session; log views.
 - Chat: use `postChatMessage` (instant) from the client; `sendChatMessage` is the no-JS fallback.
+
+- Every migration that creates an org-scoped table ends with `select audit_attach_all();` so the activity log covers it (0043).

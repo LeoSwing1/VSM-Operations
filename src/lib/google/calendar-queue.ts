@@ -1,3 +1,4 @@
+import { appUrl as baseUrl } from "@/lib/app-url";
 import "server-only";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { googleConnectionFor, googleFetch, hasScope } from "./oauth";
@@ -39,7 +40,7 @@ export async function drainCalendarQueue(limit = 25) {
   const sb = supabaseAdmin();
   const { data: jobs, error } = await sb.rpc("claim_calendar_sync", { p_limit: limit });
   if (error) throw new Error(error.message);
-  const appUrl = process.env.APP_URL ?? "https://ops.vsmgrowth.com";
+  const appUrl = baseUrl();
   let done = 0,
     failed = 0,
     skipped = 0;

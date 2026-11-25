@@ -5,6 +5,7 @@ import { Badge, Card, Empty, Field, Flash, PageHeader, TableWrap } from "@/compo
 import { createDepartment, createEmployee } from "./actions";
 import { EmployeeFields } from "./employee-form";
 import { addMode, assignableRoles } from "@/lib/data/roles";
+import { firstSalaryDate, longDate, ordinal } from "@/lib/engines/salary-day";
 
 export const metadata = { title: "People" };
 
@@ -17,7 +18,7 @@ export default async function People({ searchParams }: { searchParams: Promise<R
   let query = sb
     .from("employees")
     .select(
-      "id, employee_code, full_name, designation, role, status, user_id, department:departments!department_id(name), manager:employees!manager_id(full_name)",
+      "id, employee_code, full_name, designation, role, status, user_id, joining_date, salary_day, department:departments!department_id(name), manager:employees!manager_id(full_name)",
     )
     .order("full_name");
   if (sp.q) query = query.or(`full_name.ilike.%${sp.q.replace(/[%,()]/g, "")}%,employee_code.ilike.%${sp.q.replace(/[%,()]/g, "")}%`);
@@ -157,6 +158,57 @@ export default async function People({ searchParams }: { searchParams: Promise<R
         <button className="btn-ghost">Filter</button>
       </form>
 
+      {(manage || adding) &&
+        (() => {
+          const now = Date.now();
+          const joiners = (people ?? [])
+            .filter((p: any) => p.joining_date && p.status !== "EXITED")
+            .filter((p: any) => {
+              const t = new Date(p.joining_date + "T00:00:00Z").getTime();
+              return t >= now - 45 * 86_400_000 && t <= now + 90 * 86_400_000;
+            })
+            .sort((a: any, b: any) => (a.joining_date < b.joining_date ? 1 : -1))
+            .slice(0, 12);
+          if (!joiners.length) return null;
+          return (
+            <Card
+              title="New joiners"
+              hint="Joining in the next 90 days or in the last 45. Salary date = joining date + 7 days unless HR set another day."
+              className="mb-6"
+            >
+              <TableWrap>
+                <table className="table min-w-[620px]">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Joining date</th>
+                      <th>Salary date</th>
+                      <th>First salary</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {joiners.map((p: any) => (
+                      <tr key={p.id}>
+                        <td>
+                          <Link href={`/people/${p.id}?tab=onboarding`} className="font-semibold hover:text-volt">
+                            {p.full_name}
+                          </Link>
+                          <span className="ml-2 text-xs text-muted">{p.designation ?? ""}</span>
+                        </td>
+                        <td className="whitespace-nowrap">{longDate(p.joining_date)}</td>
+                        <td className="whitespace-nowrap">{p.salary_day ? `${ordinal(p.salary_day)} of every month` : "—"}</td>
+                        <td className="whitespace-nowrap font-semibold">
+                          {p.salary_day ? longDate(firstSalaryDate(p.salary_day, p.joining_date)) : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </TableWrap>
+            </Card>
+          );
+        })()}
+
       <Card>
         {(people ?? []).length === 0 ? (
           <Empty
@@ -169,7 +221,7 @@ export default async function People({ searchParams }: { searchParams: Promise<R
           />
         ) : (
           <TableWrap>
-            <table className="table min-w-[720px]">
+            <table className="table min-w-[900px]">
               <thead>
                 <tr>
                   <th>ID</th>
@@ -178,6 +230,8 @@ export default async function People({ searchParams }: { searchParams: Promise<R
                   <th>Department</th>
                   <th>Manager</th>
                   <th>Role</th>
+                  <th>Joined</th>
+                  <th>Salary date</th>
                   <th>Status</th>
                 </tr>
               </thead>
@@ -195,6 +249,8 @@ export default async function People({ searchParams }: { searchParams: Promise<R
                     <td>{p.department?.name ?? "—"}</td>
                     <td className="text-muted">{p.manager?.full_name ?? "—"}</td>
                     <td className="text-xs">{ROLE_LABEL[p.role as Role]}</td>
+                    <td className="whitespace-nowrap text-xs">{p.joining_date ? longDate(p.joining_date) : "—"}</td>
+                    <td className="whitespace-nowrap text-xs">{p.salary_day ? `${ordinal(p.salary_day)} monthly` : "—"}</td>
                     <td>
                       <Badge>{p.status}</Badge>
                     </td>

@@ -1,3 +1,4 @@
+import { appUrl } from "@/lib/app-url";
 import Link from "next/link";
 import { can, requireContext } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
@@ -27,7 +28,7 @@ export default async function Inbound({ searchParams }: { searchParams: Promise<
   if (provider !== "ALL") q = q.eq("provider", provider);
   const { data: events } = await q;
   const cfg = channelConfig();
-  const base = process.env.APP_URL ?? "https://ops.vsmgrowth.com";
+  const base = appUrl();
   type Ent = { amount?: number; currency?: string };
   const amount = (p: Record<string, unknown>) => {
     const pl = (p?.payload ?? {}) as Record<string, { entity?: Ent } | undefined>;

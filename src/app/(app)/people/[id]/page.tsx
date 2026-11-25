@@ -6,7 +6,7 @@ import { loadAttendance, minutesToHm } from "@/lib/data/attendance";
 import { computeForEmployee } from "@/lib/data/performance";
 import { Badge, Card, Empty, Flash, Meter, PageHeader, Stat, TableWrap, Tabs, inr } from "@/components/ui";
 import { fmtDate, fmtDateTime, localDate, monthBounds } from "@/lib/engines/time";
-import { nextSalaryDate, ordinal } from "@/lib/engines/salary-day";
+import { firstSalaryDate, longDate, nextSalaryDate, ordinal } from "@/lib/engines/salary-day";
 import { EmployeeFields } from "../employee-form";
 import { LoginPanel } from "../login-panel";
 import { copyDocumentToDrive } from "../../settings/integrations/google-actions";
@@ -222,17 +222,39 @@ function Overview({ e, manage, canReset, self, teams }: { e: any; manage: boolea
 }
 
 async function OnboardingTab({ sb, id, manage }: { sb: SB; id: string; manage: boolean }) {
+  const { data: who } = await sb.from("employees").select("joining_date, salary_day").eq("id", id).maybeSingle();
+  const dates =
+    who?.joining_date && who?.salary_day ? (
+      <div className="mb-4 grid gap-3 sm:grid-cols-3">
+        <Stat label="Joining date" value={longDate(who.joining_date)} />
+        <Stat label="Salary date" value={`${ordinal(who.salary_day)} monthly`} />
+        <Stat label="First salary" value={longDate(firstSalaryDate(who.salary_day, who.joining_date))} tone="volt" />
+      </div>
+    ) : null;
   const { data, error } = await sb
     .from("onboarding_checklist_items")
     .select("id,title,category,due_date,completed_at,completed_by")
     .eq("employee_id", id)
     .order("created_at");
-  if (error) return <Empty title="Onboarding checklist unavailable" hint="You do not have access to this employee's checklist." />;
-  if (!data?.length && !manage) return <Empty title="No onboarding checklist" hint="HR can add checklist items for this employee." />;
+  if (error)
+    return (
+      <>
+        {dates}
+        <Empty title="Onboarding checklist unavailable" hint="You do not have access to this employee's checklist." />
+      </>
+    );
+  if (!data?.length && !manage)
+    return (
+      <>
+        {dates}
+        <Empty title="No onboarding checklist" hint="HR can add checklist items for this employee." />
+      </>
+    );
   const items = data ?? [];
   const done = items.filter((x) => x.completed_at).length;
   return (
     <Card title={`Onboarding · ${done}/${items.length} complete`}>
+      {dates}
       <div className="mb-4 h-2 overflow-hidden rounded-full bg-line">
         <div className="h-full rounded-full bg-volt" style={{ width: `${(done / data.length) * 100}%` }} />
       </div>

@@ -118,3 +118,17 @@ describe("salary day", () => {
     expect(ordinal(1) + ordinal(2) + ordinal(3) + ordinal(11) + ordinal(22)).toBe("1st2nd3rd11th22nd");
   });
 });
+
+import { firstSalaryDate, longDate, salaryLabel } from "@/lib/engines/salary-day";
+describe("first salary date", () => {
+  it("joining 1 Jan with the default day → first salary 8 Jan", () => {
+    expect(firstSalaryDate(8, "2027-01-01")).toBe("2027-01-08");
+    expect(salaryLabel(8, "2027-01-01")).toBe("8th of every month · first salary 8 Jan 2027");
+  });
+  it("rolls into the next month and clamps short months", () => {
+    expect(firstSalaryDate(4, "2027-01-28")).toBe("2027-02-04");
+    expect(firstSalaryDate(31, "2027-02-10")).toBe("2027-02-28");
+    expect(firstSalaryDate(10, "2027-01-10")).toBe("2027-02-10");
+    expect(longDate("2027-12-31")).toBe("31 Dec 2027");
+  });
+});

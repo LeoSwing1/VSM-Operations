@@ -1,4 +1,5 @@
 "use server";
+import { appUrl } from "@/lib/app-url";
 import { z } from "zod";
 import { can, requirePerm, requireContext, ROLES } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
@@ -138,7 +139,7 @@ export async function resendInvite(fd: FormData) {
   if (emp.user_id) flash(`/people/${id}`, "err", "This employee already has an account.");
   const admin = supabaseAdmin();
   const { data: inv, error } = await admin.auth.admin.inviteUserByEmail(emp.official_email, {
-    redirectTo: `${process.env.APP_URL ?? ""}/auth/callback?next=/login/reset`,
+    redirectTo: `${appUrl()}/auth/callback?next=/login/reset`,
     data: { full_name: emp.full_name },
   });
   if (error || !inv.user) flash(`/people/${id}`, "err", "Invitation failed — check Supabase Auth email settings.");

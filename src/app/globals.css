@@ -11,6 +11,11 @@
   color-scheme: light;
 }
 html, body { background: rgb(var(--paper)); color: rgb(var(--ink)); }
+html { transition: background-color .2s ease, color .2s ease; }
+/* Light mode: the neon accent stays on fills (buttons, chips) but text and outlines use a darker, readable green. */
+:root.light .text-volt, :root.light .hover\:text-volt:hover { color: #4d6b00; }
+:root.light .border-volt, :root.light .hover\:border-volt:hover, :root.light .focus\:border-volt:focus { border-color: #8fb300; }
+:root.light *:focus-visible { outline-color: #4d6b00; }
 body { font-family: 'Inter Tight', ui-sans-serif, system-ui, sans-serif; font-feature-settings: "ss01", "cv11"; overflow-x: hidden; }
 *:focus-visible { outline: 2px solid #D7FF3A; outline-offset: 2px; border-radius: 6px; }
 ::selection { background: #D7FF3A; color: #0b0b0c; }

@@ -1,9 +1,9 @@
+import { appUrl } from "@/lib/app-url";
 /**
  * Message builders for each channel (pure functions, unit-tested).
  * Organisation channels receive allow-listed events only; amounts were already stripped in the DB.
  */
 export type Payload = Record<string, unknown>;
-const appUrl = () => process.env.APP_URL ?? "https://ops.vsmgrowth.com";
 /** Same-origin app path only: "/x" yes, "//host" or "/\\host" no. */
 export const localPath = (link: unknown): string | null =>
   typeof link === "string" && /^\/(?![/\\])/.test(link) ? link.slice(0, 500) : null;

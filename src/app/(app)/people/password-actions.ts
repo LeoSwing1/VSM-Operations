@@ -1,4 +1,5 @@
 "use server";
+import { appUrl } from "@/lib/app-url";
 import { z } from "zod";
 import { requirePerm } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
@@ -36,7 +37,7 @@ export async function sendResetLink(_p: PwState, fd: FormData): Promise<PwState>
   const t = await target(fd);
   if ("err" in t) return { ok: false, message: t.err! };
   if (!t.e.user_id) return { ok: false, message: "No login yet — use “Send welcome email” first." };
-  const redirectTo = `${process.env.APP_URL ?? ""}/auth/callback?next=/login/reset`;
+  const redirectTo = `${appUrl()}/auth/callback?next=/login/reset`;
   const admin = supabaseAdmin();
   const provider = await getProvider();
   const from = process.env.EMAIL_FROM;

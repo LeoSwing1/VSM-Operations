@@ -1,3 +1,4 @@
+import { appUrl } from "@/lib/app-url";
 import { requireContext, can } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
@@ -55,7 +56,7 @@ export default async function GooglePage({ searchParams }: { searchParams: Promi
         <p className="mb-6 rounded-xl border border-ember/40 bg-ember/10 px-4 py-3 text-sm">
           Google isn&apos;t configured yet. Add <code>GOOGLE_CLIENT_ID</code>, <code>GOOGLE_CLIENT_SECRET</code> and{" "}
           <code>CALENDAR_TOKEN_ENCRYPTION_KEY</code> in Vercel (see RUNBOOK → Google Workspace), with redirect URI{" "}
-          <code>{process.env.APP_URL ?? "https://ops.vsmgrowth.com"}/api/integrations/calendar/google/callback</code>.
+          <code>{appUrl()}/api/integrations/calendar/google/callback</code>.
         </p>
       )}
       <div className="grid gap-4 lg:grid-cols-2">
