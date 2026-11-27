@@ -16,7 +16,7 @@ export default async function ChatHome({ searchParams }: { searchParams: Promise
   const sp = await searchParams,
     ctx = await requirePerm("communication.view"),
     sb = await supabaseServer();
-  const [{ data: channels }, { data: memberships }, { data: directory }, { data: departments }] = await Promise.all([
+  const [{ data: channels }, { data: memberships }, { data: directory }, { data: departments }, { data: archived }] = await Promise.all([
     sb
       .from("chat_channels")
       .select("id,name,description,channel_type,created_at,project_id,department_id")
@@ -25,6 +25,7 @@ export default async function ChatHome({ searchParams }: { searchParams: Promise
     sb.from("chat_channel_members").select("channel_id,last_read_at").eq("employee_id", ctx.employee_id),
     sb.from("employee_directory").select("id,full_name,designation,department_name").neq("id", ctx.employee_id).order("full_name"),
     sb.from("departments").select("id,name").order("name"),
+    sb.rpc("my_archived_chats"),
   ]);
   const mine = new Set((memberships ?? []).map((m: any) => m.channel_id));
   const directIds = (channels ?? []).filter((c: any) => c.channel_type === "DIRECT").map((c: any) => c.id);
@@ -42,6 +43,9 @@ export default async function ChatHome({ searchParams }: { searchParams: Promise
     <>
       <PageHeader eyebrow="VSM workspace · communication" title="Team chat">
         <Badge tone="green">Internal workspace</Badge>
+        <Link href="/chat/archived" className="btn-ghost">
+          🗄 Archived chats{archived?.length ? ` (${archived.length})` : ""}
+        </Link>
       </PageHeader>
       <Flash sp={sp} />
       <div className="grid min-h-[70vh] gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(300px,.85fr)]">

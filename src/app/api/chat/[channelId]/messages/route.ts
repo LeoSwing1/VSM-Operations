@@ -53,10 +53,13 @@ export async function GET(_request: Request, { params }: { params: Promise<{ cha
         // Images, video, audio and PDF open in place (original quality). Everything else downloads, so an HTML/SVG
         // file can never run as a web page.
         const inline = /^(image\/(jpeg|png|webp|gif|avif|bmp)|video\/(mp4|webm|quicktime|ogg)|audio\/|application\/pdf$)/.test(a.mime_type);
-        const { data } = await sb.storage
-          .from("chat-files")
-          .createSignedUrl(a.storage_path, 3600, inline ? undefined : { download: a.file_name });
-        return { ...a, url: data?.signedUrl ?? null };
+        // Both links point at the untouched original file — no resizing or re-encoding anywhere.
+        const [view, save] = await Promise.all([
+          sb.storage.from("chat-files").createSignedUrl(a.storage_path, 3600, inline ? undefined : { download: a.file_name }),
+          inline ? sb.storage.from("chat-files").createSignedUrl(a.storage_path, 3600, { download: a.file_name }) : Promise.resolve(null),
+        ]);
+        const url = view.data?.signedUrl ?? null;
+        return { ...a, url, download_url: (save ? save.data?.signedUrl : url) ?? null };
       }),
     );
     const response = messageRows.map((m) => ({

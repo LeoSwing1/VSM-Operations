@@ -6,7 +6,16 @@ import { addChatReaction, postChatMessage, reportChatMessage, sendChatMessage } 
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { openChannel, supabaseBrowser } from "@/lib/supabase/browser";
 import { CHAT_THEMES, themeByKey } from "./chat-themes";
-import { MAX_CHAT_FILE, chatFilePath, formatSize, previewKind, uploadWithProgress, type PreviewKind } from "@/lib/chat-upload";
+import {
+  MAX_CHAT_FILE,
+  RESUMABLE_FROM,
+  chatFilePath,
+  formatSize,
+  previewKind,
+  uploadResumable,
+  uploadWithProgress,
+  type PreviewKind,
+} from "@/lib/chat-upload";
 
 /** A file being uploaded from this browser: shown in the composer, then inside the sent bubble until it lands. */
 type LocalUpload = {
@@ -24,7 +33,7 @@ type LocalUpload = {
   abort: () => void;
 };
 
-type Attachment = { id: string; file_name: string; url: string | null; mime_type: string; file_size: number };
+type Attachment = { id: string; file_name: string; url: string | null; download_url?: string | null; mime_type: string; file_size: number };
 type Message = {
   id: string;
   body: string;
@@ -181,6 +190,7 @@ export function ChatRoom({
   const [pending, setPending] = useState<LocalUpload | null>(null);
   const [inflight, setInflight] = useState<Record<string, LocalUpload>>({});
   const [dragging, setDragging] = useState(false);
+  const [viewer, setViewer] = useState<Attachment | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const [themeKey, setThemeKey] = useState("volt");
   useEffect(() => {
@@ -239,7 +249,7 @@ export function ChatRoom({
     setError("");
     if (!orgId) return setError("Attachments are not available here.");
     if (file.size === 0) return setError("That file is empty.");
-    if (file.size > MAX_CHAT_FILE) return setError(`"${file.name}" is ${formatSize(file.size)} — files can be up to 50 MB.`);
+    if (file.size > MAX_CHAT_FILE) return setError(`"${file.name}" is ${formatSize(file.size)} — files can be up to 10 GB.`);
     if (pending) discardPending();
     const sb = supabaseBrowser();
     const { data } = await sb.auth.getSession();
@@ -248,15 +258,19 @@ export function ChatRoom({
     const mime = file.type || "application/octet-stream";
     const kind = previewKind(mime, file.name);
     const path = chatFilePath(orgId, channelId, employeeId, file.name, crypto.randomUUID());
-    const up = uploadWithProgress({
+    const common = {
       supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      anonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
       accessToken: token,
       bucket: "chat-files",
       path,
       file,
-      onProgress: (pct) => update(path, { progress: pct }),
-    });
+      onProgress: (pct: number) => update(path, { progress: pct }),
+    };
+    // Small files in one request; big ones (videos, project files) in resumable 6 MB chunks — original bytes either way.
+    const up =
+      file.size > RESUMABLE_FROM
+        ? uploadResumable(common)
+        : uploadWithProgress({ ...common, anonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY! });
     const item: LocalUpload = {
       file,
       name: file.name,
@@ -490,76 +504,9 @@ export function ChatRoom({
                   {inflight[m.id] && <UploadPreview u={inflight[m.id]!} inBubble />}
                   {!!m.attachments.length && (
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {m.attachments.map((a) => {
-                        const kb =
-                          a.file_size >= 1048576
-                            ? `${(a.file_size / 1048576).toFixed(1)} MB`
-                            : `${Math.max(1, Math.round(a.file_size / 1024))} KB`;
-                        if (a.url && /^image\/(jpeg|png|webp|gif|avif|bmp)$/.test(a.mime_type))
-                          return (
-                            <a
-                              key={a.id}
-                              href={a.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              title={`Open ${a.file_name} in full quality`}
-                              className="block"
-                            >
-                              {/* eslint-disable-next-line @next/next/no-img-element -- private signed URL, shown at original quality */}
-                              <img
-                                src={a.url}
-                                alt={a.file_name}
-                                loading="lazy"
-                                onLoad={keepPinned}
-                                className="max-h-80 max-w-full rounded-xl object-contain"
-                              />
-                              <span className="mt-1 block text-[11px] opacity-70">
-                                {a.file_name} · {kb}
-                              </span>
-                            </a>
-                          );
-                        if (a.url && /^video\//.test(a.mime_type))
-                          return (
-                            <div key={a.id} className="w-full">
-                              <video
-                                src={a.url}
-                                controls
-                                preload="metadata"
-                                onLoadedMetadata={keepPinned}
-                                className="max-h-80 w-full rounded-xl"
-                              />
-                              <a href={a.url} target="_blank" rel="noreferrer" className="mt-1 block text-[11px] underline opacity-70">
-                                {a.file_name} · {kb}
-                              </a>
-                            </div>
-                          );
-                        if (a.url && /^audio\//.test(a.mime_type))
-                          return (
-                            <div key={a.id} className="w-full">
-                              <audio src={a.url} controls preload="metadata" className="w-full" />
-                              <span className="mt-1 block text-[11px] opacity-70">
-                                {a.file_name} · {kb}
-                              </span>
-                            </div>
-                          );
-                        return (
-                          <a
-                            key={a.id}
-                            href={a.url ?? "#"}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="flex items-center gap-2 rounded-lg border border-current/20 px-3 py-2 text-xs hover:opacity-75"
-                          >
-                            <span aria-hidden>{a.mime_type === "application/pdf" ? "📄" : "📎"}</span>
-                            <span>
-                              {a.file_name}
-                              <span className="block opacity-70">
-                                {kb} · {a.mime_type === "application/pdf" ? "open" : "download"}
-                              </span>
-                            </span>
-                          </a>
-                        );
-                      })}
+                      {m.attachments.map((a) => (
+                        <AttachmentView key={a.id} a={a} onLoaded={keepPinned} onOpen={setViewer} />
+                      ))}
                     </div>
                   )}
                 </div>
@@ -677,6 +624,7 @@ export function ChatRoom({
           );
         })}
       </div>
+      {viewer && <Lightbox a={viewer} onClose={() => setViewer(null)} />}
       {unseenBelow && (
         <button
           type="button"
@@ -714,7 +662,7 @@ export function ChatRoom({
             />
             <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
               <label className="cursor-pointer rounded-lg px-3 py-2 text-xs text-muted hover:bg-ink/[0.05]">
-                ＋ {pending ? "Change file" : "Attach any file (up to 50 MB) — or paste / drop it here"}
+                ＋ {pending ? "Change file" : "Attach any file (up to 10 GB) — or paste / drop it here"}
                 <input
                   ref={fileInput}
                   name="file"
@@ -737,7 +685,45 @@ export function ChatRoom({
   );
 }
 
-/** Preview of a file being uploaded: thumbnail (or icon), name, size, progress bar, and status. */
+/** Circular progress ring with the percentage in the middle (WhatsApp-style). */
+function ProgressRing({ pct, size = 56, onCancel }: { pct: number; size?: number; onCancel?: () => void }) {
+  const r = (size - 6) / 2;
+  const c = 2 * Math.PI * r;
+  return (
+    <span className="relative grid place-items-center rounded-full bg-black/55 text-white shadow-lg" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className="absolute inset-0 -rotate-90" aria-hidden>
+        <circle cx={size / 2} cy={size / 2} r={r} stroke="rgba(255,255,255,.25)" strokeWidth="3" fill="none" />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          stroke="#D7FF3A"
+          strokeWidth="3"
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={c}
+          strokeDashoffset={c * (1 - Math.max(2, pct) / 100)}
+          className="transition-[stroke-dashoffset] duration-300"
+        />
+      </svg>
+      {onCancel ? (
+        <button type="button" onClick={onCancel} aria-label="Cancel upload" className="relative text-xs font-semibold">
+          <span className="block leading-none">{pct}%</span>
+          <span className="block text-[10px] leading-none opacity-80">✕</span>
+        </button>
+      ) : (
+        <span className="relative text-xs font-semibold">{pct}%</span>
+      )}
+    </span>
+  );
+}
+
+const extOf = (name: string) => (name.includes(".") ? name.split(".").pop()!.slice(0, 5).toUpperCase() : "FILE");
+
+/**
+ * Preview of a file being uploaded. Photos and videos show blurred with a progress ring while uploading and turn
+ * sharp with a tick when they're ready; documents show a file card with the same ring.
+ */
 function UploadPreview({
   u,
   inBubble = false,
@@ -749,73 +735,230 @@ function UploadPreview({
   onRemove?: () => void;
   onRetry?: () => void;
 }) {
-  const icon = u.kind === "pdf" ? "📄" : u.kind === "audio" ? "🎵" : u.kind === "video" ? "🎬" : "📎";
   const busy = u.status === "uploading";
+  const failed = u.status === "error";
+  const visual = (u.kind === "image" || u.kind === "video") && u.url;
+  const status = busy ? `Uploading… ${u.progress}%` : u.status === "done" ? (inBubble ? "Sending…" : "Ready to send") : "Upload failed";
   return (
-    <div className={`relative overflow-hidden rounded-xl border ${inBubble ? "mt-2 border-current/20" : "border-line bg-panel"} p-2`}>
-      <div className="flex items-center gap-3">
-        <div className="relative grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-lg bg-ink/[0.06] text-2xl">
-          {u.kind === "image" && u.url ? (
+    <div className={`relative ${inBubble ? "mt-2" : ""}`}>
+      {visual ? (
+        <div className={`relative overflow-hidden rounded-xl bg-black ${inBubble ? "max-w-sm" : "max-w-xs"}`}>
+          {u.kind === "image" ? (
             // eslint-disable-next-line @next/next/no-img-element -- local object URL preview
-            <img src={u.url} alt="" className={`h-full w-full object-cover ${busy ? "opacity-60" : ""}`} />
-          ) : u.kind === "video" && u.url ? (
-            <video src={u.url} muted preload="metadata" className={`h-full w-full object-cover ${busy ? "opacity-60" : ""}`} />
-          ) : (
-            <span aria-hidden>{icon}</span>
-          )}
-          {busy && (
-            <span className="absolute inset-0 grid place-items-center">
-              <span className="h-6 w-6 animate-spin rounded-full border-2 border-white/40 border-t-white" aria-hidden />
-            </span>
-          )}
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{u.name}</p>
-          <p className="text-[11px] opacity-70">
-            {formatSize(u.size)} ·{" "}
-            {u.status === "uploading"
-              ? `Uploading… ${u.progress}%`
-              : u.status === "done"
-                ? inBubble
-                  ? "Uploaded — sending…"
-                  : "Ready to send ✓"
-                : "Upload failed"}
-          </p>
-          <div
-            className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-ink/10"
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={u.progress}
-            aria-label={`Uploading ${u.name}`}
-          >
-            <div
-              className={`h-full rounded-full transition-[width] duration-200 ${u.status === "error" ? "bg-danger" : u.status === "done" ? "bg-emerald-500" : "bg-volt"}`}
-              style={{ width: `${u.status === "error" ? 100 : u.progress}%` }}
+            <img
+              src={u.url!}
+              alt=""
+              className={`max-h-64 w-full object-cover transition duration-500 ${busy || failed ? "scale-105 blur-md brightness-75" : ""}`}
             />
-          </div>
-          {u.status === "error" && <p className="mt-1 text-[11px] text-danger">{u.error}</p>}
-        </div>
-        {!inBubble && (
-          <div className="flex shrink-0 flex-col gap-1">
-            {u.status === "error" && onRetry && (
-              <button type="button" onClick={onRetry} className="rounded-md px-2 py-1 text-xs font-semibold text-volt hover:bg-ink/5">
-                Retry
-              </button>
-            )}
-            {onRemove && (
-              <button
-                type="button"
-                onClick={onRemove}
-                aria-label={`Remove ${u.name}`}
-                title="Remove"
-                className="rounded-md px-2 py-1 text-xs text-muted hover:bg-ink/5"
+          ) : (
+            <video
+              src={u.url!}
+              muted
+              playsInline
+              preload="metadata"
+              className={`max-h-64 w-full object-cover transition duration-500 ${busy || failed ? "scale-105 blur-md brightness-75" : ""}`}
+            />
+          )}
+          <span className="absolute inset-0 grid place-items-center">
+            {busy ? (
+              <ProgressRing pct={u.progress} onCancel={inBubble ? undefined : onRemove} />
+            ) : failed ? (
+              <span className="rounded-full bg-danger px-3 py-1 text-xs font-semibold text-white">Failed</span>
+            ) : (
+              <span
+                className="grid h-10 w-10 place-items-center rounded-full bg-emerald-500 text-lg text-white shadow-lg"
+                aria-label="Ready"
               >
-                ✕
-              </button>
+                ✓
+              </span>
             )}
-          </div>
+          </span>
+          {u.kind === "video" && !busy && (
+            <span className="absolute left-2 top-2 rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] text-white">▶ Video</span>
+          )}
+          <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-3 pb-2 pt-6 text-[11px] text-white">
+            <span className="block truncate font-medium">{u.name}</span>
+            {formatSize(u.size)} · {status}
+          </span>
+        </div>
+      ) : (
+        <div className={`flex items-center gap-3 rounded-xl border p-2.5 ${inBubble ? "border-current/20" : "border-line bg-panel"}`}>
+          <span className="relative grid h-14 w-12 shrink-0 place-items-center rounded-lg bg-ink/[0.07] text-[10px] font-bold">
+            <span className={busy ? "opacity-30" : ""}>{u.kind === "pdf" ? "PDF" : u.kind === "audio" ? "🎵" : extOf(u.name)}</span>
+            {busy && (
+              <span className="absolute inset-0 grid place-items-center">
+                <ProgressRing pct={u.progress} size={40} />
+              </span>
+            )}
+            {u.status === "done" && (
+              <span className="absolute -bottom-1 -right-1 grid h-5 w-5 place-items-center rounded-full bg-emerald-500 text-[10px] text-white">
+                ✓
+              </span>
+            )}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium">{u.name}</span>
+            <span className="block text-[11px] opacity-70">
+              {formatSize(u.size)} · {status}
+            </span>
+            <span className="mt-1.5 block h-1 w-full overflow-hidden rounded-full bg-ink/10">
+              <span
+                className={`block h-full rounded-full transition-[width] duration-300 ${failed ? "bg-danger" : u.status === "done" ? "bg-emerald-500" : "bg-volt"}`}
+                style={{ width: `${failed ? 100 : u.progress}%` }}
+              />
+            </span>
+          </span>
+        </div>
+      )}
+      {failed && <p className="mt-1 text-[11px] text-danger">{u.error}</p>}
+      {!inBubble && (
+        <div className="mt-1 flex gap-2">
+          {failed && onRetry && (
+            <button type="button" onClick={onRetry} className="rounded-md px-2 py-1 text-xs font-semibold text-volt hover:bg-ink/5">
+              Retry
+            </button>
+          )}
+          {onRemove && (
+            <button type="button" onClick={onRemove} className="rounded-md px-2 py-1 text-xs text-muted hover:bg-ink/5">
+              {busy ? "Cancel upload" : "Remove"}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Save to device: the signed link carries Content-Disposition: attachment, so the original file downloads. */
+function SaveButton({ a, light = false }: { a: Attachment; light?: boolean }) {
+  const href = a.download_url ?? a.url;
+  if (!href) return null;
+  return (
+    <a
+      href={href}
+      download={a.file_name}
+      rel="noreferrer"
+      title={`Save ${a.file_name} to this device (original quality)`}
+      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+        light ? "bg-black/60 text-white hover:bg-black/80" : "border border-current/25 hover:opacity-75"
+      }`}
+    >
+      ⬇ Save
+    </a>
+  );
+}
+
+function AttachmentView({ a, onLoaded, onOpen }: { a: Attachment; onLoaded: () => void; onOpen: (a: Attachment) => void }) {
+  const size = formatSize(a.file_size);
+  if (a.url && /^image\/(jpeg|png|webp|gif|avif|bmp)$/.test(a.mime_type))
+    return (
+      <figure className="relative max-w-sm">
+        <button type="button" onClick={() => onOpen(a)} title="View full size" className="block w-full">
+          {/* eslint-disable-next-line @next/next/no-img-element -- private signed URL, the original file */}
+          <img src={a.url} alt={a.file_name} loading="lazy" onLoad={onLoaded} className="max-h-80 w-full rounded-xl object-contain" />
+        </button>
+        <span className="absolute right-2 top-2">
+          <SaveButton a={a} light />
+        </span>
+        <figcaption className="mt-1 text-[11px] opacity-70">
+          {a.file_name} · {size} · original quality
+        </figcaption>
+      </figure>
+    );
+  if (a.url && /^video\//.test(a.mime_type))
+    return (
+      <figure className="w-full max-w-md">
+        <video
+          src={a.url}
+          controls
+          preload="metadata"
+          playsInline
+          onLoadedMetadata={onLoaded}
+          className="max-h-80 w-full rounded-xl bg-black"
+        />
+        <figcaption className="mt-1 flex items-center justify-between gap-2 text-[11px]">
+          <span className="truncate opacity-70">
+            {a.file_name} · {size}
+          </span>
+          <SaveButton a={a} />
+        </figcaption>
+      </figure>
+    );
+  if (a.url && /^audio\//.test(a.mime_type))
+    return (
+      <figure className="w-full max-w-md">
+        <audio src={a.url} controls preload="metadata" className="w-full" />
+        <figcaption className="mt-1 flex items-center justify-between gap-2 text-[11px]">
+          <span className="truncate opacity-70">
+            {a.file_name} · {size}
+          </span>
+          <SaveButton a={a} />
+        </figcaption>
+      </figure>
+    );
+  const pdf = a.mime_type === "application/pdf";
+  return (
+    <div className="flex max-w-sm items-center gap-3 rounded-xl border border-current/20 p-2.5">
+      <span className="grid h-12 w-10 shrink-0 place-items-center rounded-md bg-black/10 text-[10px] font-bold">
+        {pdf ? "PDF" : extOf(a.file_name)}
+      </span>
+      <span className="min-w-0 flex-1">
+        {a.url && pdf ? (
+          <a
+            href={a.url}
+            target="_blank"
+            rel="noreferrer"
+            className="block truncate text-sm font-medium underline-offset-2 hover:underline"
+          >
+            {a.file_name}
+          </a>
+        ) : (
+          <span className="block truncate text-sm font-medium">{a.file_name}</span>
         )}
+        <span className="block text-[11px] opacity-70">
+          {size}
+          {pdf ? " · tap name to open" : ""}
+        </span>
+      </span>
+      <SaveButton a={a} />
+    </div>
+  );
+}
+
+/** Full-screen photo viewer at original resolution. */
+function Lightbox({ a, onClose }: { a: Attachment; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={a.file_name}
+      className="fixed inset-0 z-50 flex flex-col bg-black/95"
+      onClick={onClose}
+    >
+      <div className="flex items-center justify-between gap-3 px-4 py-3 text-sm text-white" onClick={(e) => e.stopPropagation()}>
+        <span className="truncate">
+          {a.file_name} · {formatSize(a.file_size)}
+        </span>
+        <span className="flex items-center gap-2">
+          <SaveButton a={a} light />
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-white/10 px-3 py-1 text-xs hover:bg-white/20"
+            aria-label="Close"
+          >
+            ✕ Close
+          </button>
+        </span>
+      </div>
+      <div className="grid min-h-0 flex-1 place-items-center overflow-auto p-2">
+        {/* eslint-disable-next-line @next/next/no-img-element -- original file, no resizing */}
+        <img src={a.url!} alt={a.file_name} className="max-h-full max-w-full object-contain" onClick={(e) => e.stopPropagation()} />
       </div>
     </div>
   );

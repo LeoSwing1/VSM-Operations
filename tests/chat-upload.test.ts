@@ -83,3 +83,73 @@ describe("uploadWithProgress", () => {
     await expect(up.promise).rejects.toThrow("cancelled");
   });
 });
+
+import { RESUMABLE_FROM, MAX_CHAT_FILE, storageHost, uploadResumable } from "@/lib/chat-upload";
+
+const tusState: { opts?: any; aborted?: boolean } = {};
+vi.mock("tus-js-client", () => ({
+  Upload: class {
+    constructor(_f: unknown, opts: any) {
+      tusState.opts = opts;
+    }
+    findPreviousUploads() {
+      return Promise.resolve([]);
+    }
+    resumeFromPreviousUpload() {}
+    start() {}
+    abort() {
+      tusState.aborted = true;
+      return Promise.resolve();
+    }
+  },
+}));
+
+describe("large files (resumable)", () => {
+  it("allows up to 10 GB and switches to chunks above 6 MB", () => {
+    expect(MAX_CHAT_FILE).toBe(10 * 1024 ** 3);
+    expect(RESUMABLE_FROM).toBe(6 * 1024 ** 2);
+    expect(formatSize(3.5 * 1024 ** 3)).toBe("3.50 GB");
+  });
+  it("uses Supabase's direct storage host", () => {
+    expect(storageHost("https://abcd1234.supabase.co/")).toBe("https://abcd1234.storage.supabase.co");
+    expect(storageHost("https://db.example.com")).toBe("https://db.example.com");
+  });
+  it("sends 6 MB chunks with the user's token, reports progress and finishes", async () => {
+    const seen: number[] = [];
+    const up = uploadResumable({
+      supabaseUrl: "https://abcd1234.supabase.co",
+      accessToken: "tok",
+      bucket: "chat-files",
+      path: "o/c/e/u-cut.mov",
+      file: new File(["x"], "cut.mov", { type: "video/quicktime" }),
+      onProgress: (p) => seen.push(p),
+    });
+    await vi.waitFor(() => expect(tusState.opts).toBeTruthy());
+    expect(tusState.opts.endpoint).toBe("https://abcd1234.storage.supabase.co/storage/v1/upload/resumable");
+    expect(tusState.opts.chunkSize).toBe(6 * 1024 * 1024);
+    expect(tusState.opts.headers.authorization).toBe("Bearer tok");
+    expect(tusState.opts.metadata).toMatchObject({
+      bucketName: "chat-files",
+      objectName: "o/c/e/u-cut.mov",
+      contentType: "video/quicktime",
+    });
+    tusState.opts.onProgress(3, 4);
+    tusState.opts.onSuccess();
+    await up.promise;
+    expect(seen).toEqual([75, 100]);
+  });
+  it("explains a storage size-limit rejection", async () => {
+    tusState.opts = undefined;
+    const up = uploadResumable({
+      supabaseUrl: "https://abcd1234.supabase.co",
+      accessToken: "tok",
+      bucket: "chat-files",
+      path: "o/c/e/u-big.mov",
+      file: new File(["x"], "big.mov"),
+      onProgress: () => {},
+    });
+    await vi.waitFor(() => expect(tusState.opts).toBeTruthy());
+    tusState.opts.onError(new Error("response code: 413, The object exceeded the maximum allowed size"));
+    await expect(up.promise).rejects.toThrow("Global file size limit");
+  });
+});

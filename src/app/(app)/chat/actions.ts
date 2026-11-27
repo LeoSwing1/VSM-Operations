@@ -62,9 +62,9 @@ async function insertChatMessage(fd: FormData): Promise<{ channel: string; error
   const channel = str(fd, "channel_id"),
     body = str(fd, "body").trim(),
     parent = optStr(fd, "parent_message_id");
-  // Files are uploaded straight from the browser to private storage (any type, up to 50 MB) and only referenced
+  // Files are uploaded straight from the browser to private storage (any type, up to 10 GB, resumable above 6 MB) and only referenced
   // here; the plain-form fallback still sends the file itself.
-  const MAX = 52428800;
+  const MAX = 10737418240; // 10 GB — matches the chat-files bucket (0044)
   const pre = {
     path: optStr(fd, "attachment_path"),
     name: optStr(fd, "attachment_name"),
@@ -77,7 +77,7 @@ async function insertChatMessage(fd: FormData): Promise<{ channel: string; error
   if (!body && !hasFile) return { channel, error: "Write a message or attach a file." };
   if (body.length > 10000) return { channel, error: "Message is too long." };
   if ((upload && upload.size > MAX) || (pre.path && (pre.size < 1 || pre.size > MAX)))
-    return { channel, error: "Files can be up to 50 MB." };
+    return { channel, error: "Files can be up to 10 GB." };
   const sb = await supabaseServer();
   let path: string | null = null;
   const prefix = `${ctx.org_id}/${channel}/${ctx.employee_id}/`;
@@ -91,7 +91,7 @@ async function insertChatMessage(fd: FormData): Promise<{ channel: string; error
     if (!meta) return { channel, error: "The upload didn't finish. Please attach the file again." };
     if (typeof meta.size === "number") pre.size = meta.size;
     if (meta.mimetype) pre.mime = meta.mimetype;
-    if (pre.size < 1 || pre.size > MAX) return { channel, error: "Files can be up to 50 MB." };
+    if (pre.size < 1 || pre.size > MAX) return { channel, error: "Files can be up to 10 GB." };
     path = pre.path;
   } else if (upload) {
     path = `${prefix}${crypto.randomUUID()}-${upload.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-100)}`;
@@ -292,4 +292,13 @@ export async function archiveChat(fd: FormData) {
   const { error } = await sb.rpc("archive_chat_channel", { p_channel: channel });
   if (error) flash(`/chat/${channel}`, "err", dbMessage(error));
   redirect("/chat");
+}
+export async function restoreChat(fd: FormData) {
+  await requirePerm("communication.view");
+  const channel = str(fd, "channel_id"),
+    sb = await supabaseServer();
+  const { error } = await sb.rpc("unarchive_chat_channel", { p_channel: channel });
+  if (error) flash(`/chat/archived/${channel}`, "err", dbMessage(error));
+  revalidatePath("/chat");
+  redirect(`/chat/${channel}`);
 }

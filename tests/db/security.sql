@@ -1164,8 +1164,8 @@ reset role;
 select set_config('request.jwt.claim.sub', '', false);
 select t_ok((auth_login_for_email('A@VSM.TEST') ->> 'employee_name') = 'Aman A', 'the server finds an existing login by email (case-insensitive)');
 
--- 0039: any file type up to 50 MB, delivered ticks
-select t_ok((select allowed_mime_types is null and file_size_limit = 52428800 from storage.buckets where id = 'chat-files'), 'chat files: any type, up to 50 MB');
+-- 0039: any file type, delivered ticks
+select t_ok((select allowed_mime_types is null and file_size_limit >= 52428800 from storage.buckets where id = 'chat-files'), 'chat files: any type, at least 50 MB');
 select t_ok(not exists (select 1 from pg_constraint where conrelid = 'chat_attachments'::regclass and pg_get_constraintdef(oid) ilike '%application/zip%'), 'no file-type whitelist left on chat attachments');
 select t_denied($$insert into chat_attachments(org_id, channel_id, message_id, uploaded_by, storage_path, file_name, mime_type, file_size) values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x', 'big.mov', 'video/quicktime', 60000000)$$, 'files over 50 MB are refused');
 select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
@@ -1342,6 +1342,31 @@ select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
 select t_ok((select count(distinct coalesce(actor_employee_id::text, 'system')) from audit_events) >= 3, 'the Super Admin sees everyone''s activity, not just their own');
 reset role;
 select t_ok(exists (select 1 from pg_proc where proname = 'kyc_send_request' and prosrc like '%welcome to VSM!%' and prosrc not like '%kar do%'), 'the KYC request chat message is in English');
+
+-- 0044: archived chats stay readable; restore; 10 GB files
+select t_ok((select file_size_limit = 10737418240 from storage.buckets where id = 'chat-files'), 'chat files can be up to 10 GB');
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select archive_chat_channel(:'dmc');
+select t_ok((select count(*) from chat_channels where id = :'dmc') = 0, 'an archived chat leaves the normal list');
+select t_ok(exists (select 1 from my_archived_chats() where id = :'dmc' and can_restore), 'its owner finds it under Archived chats and can restore it');
+select t_ok((select count(*) from archived_chat_history(:'dmc') where body = 'Old one') = 1, 'archived history stays readable for members');
+reset role;
+select set_config('request.jwt.claim.sub', :'B', false); set role authenticated;
+select t_ok(exists (select 1 from my_archived_chats() where id = :'dmc' and not can_restore), 'other members can read it but not restore it');
+select t_denied(format($$select unarchive_chat_channel(%L)$$, :'dmc'), 'a plain member cannot restore an archived chat');
+select t_denied(format($$insert into chat_messages(org_id, channel_id, author_id, body) values (%L, %L, %L, 'hi')$$, :'org', :'dmc', :'e_b'), 'nobody can post into an archived chat');
+reset role;
+select set_config('request.jwt.claim.sub', :'A', false); set role authenticated;
+select t_ok(not exists (select 1 from my_archived_chats() where id = :'dmc'), 'non-members do not see someone else''s archived chat');
+select t_denied(format($$select * from archived_chat_history(%L)$$, :'dmc'), 'non-members cannot read archived history');
+reset role;
+select set_config('request.jwt.claim.sub', :'S', false); set role authenticated;
+select t_ok(exists (select 1 from my_archived_chats() where id = :'dmc'), 'the Super Admin sees every archived chat');
+reset role;
+select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;
+select unarchive_chat_channel(:'dmc');
+select t_ok((select count(*) from chat_channels where id = :'dmc') = 1, 'restoring brings the chat back');
+reset role;
 
 -- Smoke: every public table is readable (subject to RLS) by every persona without policy errors.
 create or replace function t_sweep(label text) returns void language plpgsql as $$
