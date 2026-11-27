@@ -36,9 +36,11 @@ export async function middleware(req: NextRequest) {
       },
     },
   });
-  const {
-    data: { user },
-  } = await supabase.auth.getUser(); // refreshes the session cookie
+  // getClaims() refreshes the session cookie when needed and verifies the JWT. With Supabase's asymmetric signing
+  // keys it does that locally (no network call on every click); with the legacy secret it falls back to Auth.
+  const { data: claimsData } = await supabase.auth.getClaims();
+  const claims = claimsData?.claims;
+  const user = claims?.sub ? { id: claims.sub, user_metadata: (claims.user_metadata ?? {}) as Record<string, unknown> } : null;
   const path = req.nextUrl.pathname;
   if (!user && !PUBLIC.some((r) => r.test(path))) {
     if (path.startsWith("/api/")) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
@@ -66,4 +68,8 @@ export async function middleware(req: NextRequest) {
   return res;
 }
 
-export const config = { matcher: ["/((?!_next/static|_next/image|.*\\.(?:png|jpg|svg|ico|webp)$).*)"] };
+export const config = {
+  matcher: [
+    "/((?!_next/static|_next/image|icons/|sw\\.js|manifest\\.webmanifest|.*\\.(?:png|jpg|jpeg|svg|ico|webp|gif|woff2?|ttf|css|js|map|txt|mp4|webm)$).*)",
+  ],
+};

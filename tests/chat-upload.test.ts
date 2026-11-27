@@ -121,6 +121,7 @@ describe("large files (resumable)", () => {
       accessToken: "tok",
       bucket: "chat-files",
       path: "o/c/e/u-cut.mov",
+      getToken: async () => "fresh-tok",
       file: new File(["x"], "cut.mov", { type: "video/quicktime" }),
       onProgress: (p) => seen.push(p),
     });
@@ -133,6 +134,9 @@ describe("large files (resumable)", () => {
       objectName: "o/c/e/u-cut.mov",
       contentType: "video/quicktime",
     });
+    const hdr: Record<string, string> = {};
+    await tusState.opts.onBeforeRequest({ setHeader: (k: string, v: string) => (hdr[k] = v) });
+    expect(hdr.authorization).toBe("Bearer fresh-tok"); // long uploads get a fresh login token per chunk
     tusState.opts.onProgress(3, 4);
     tusState.opts.onSuccess();
     await up.promise;

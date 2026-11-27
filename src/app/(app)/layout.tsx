@@ -7,9 +7,10 @@ import { myToday } from "@/lib/data/today";
 export const dynamic = "force-dynamic";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
-  const ctx = await requireContext();
   const sb = await supabaseServer();
-  const [{ count }, today] = await Promise.all([
+  // Who-am-I, the unread count and today's punch status all go to the database at the same time.
+  const [ctx, { count }, today] = await Promise.all([
+    requireContext(),
     sb.from("notifications").select("id", { count: "exact", head: true }).is("read_at", null),
     myToday(sb),
   ]);

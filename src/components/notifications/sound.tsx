@@ -41,7 +41,7 @@ function note(ac: AudioContext, freq: number, start: number, length: number, pea
 }
 
 /** Play a tone now (respects mute; one tab only within 1.2 s). */
-export function playTone(kind: "message" | "alert" = "message", force = false) {
+export function playTone(kind: "message" | "alert" | "soft" = "message", force = false) {
   if (!force && !soundOn()) return;
   try {
     const now = Date.now();
@@ -56,10 +56,15 @@ export function playTone(kind: "message" | "alert" = "message", force = false) {
   void ac.resume().then(() => {
     const t = ac.currentTime + 0.01;
     if (kind === "message") {
-      note(ac, 880, t, 0.18, 0.18); // A5
-      note(ac, 1318.5, t + 0.11, 0.32, 0.16); // E6
+      // Two-note "ding-dong", loud enough to hear over music / a fan.
+      note(ac, 987.8, t, 0.22, 0.5); // B5
+      note(ac, 1975.5, t, 0.12, 0.12); // overtone for brightness
+      note(ac, 1318.5, t + 0.14, 0.45, 0.45); // E6
+    } else if (kind === "soft") {
+      note(ac, 1318.5, t, 0.16, 0.2); // gentle tick for the chat you're already reading
     } else {
-      note(ac, 1046.5, t, 0.28, 0.2); // C6
+      note(ac, 1046.5, t, 0.3, 0.5); // C6
+      note(ac, 1568, t + 0.12, 0.4, 0.4); // G6
     }
   });
 }
@@ -87,10 +92,28 @@ export function NotificationSound({ employeeId }: { employeeId: string }) {
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "notifications", filter: `recipient_id=eq.${employeeId}` },
         (p) => {
-          const row = p.new as { category?: string; link?: string | null };
-          // Already looking at that conversation in this tab: the message appears on screen, no need to ping.
-          if (document.visibilityState === "visible" && row.link && row.link === window.location.pathname) return;
-          playTone(row.category?.startsWith("CHAT") ? "message" : "alert");
+          const row = p.new as { category?: string; link?: string | null; title?: string; body?: string | null };
+          const chat = !!row.category?.startsWith("CHAT");
+          const looking = document.visibilityState === "visible" && !!row.link && row.link === window.location.pathname;
+          // Reading that conversation already: a gentle tick. Anything else: the full tone.
+          playTone(looking ? "soft" : chat ? "message" : "alert");
+          // Tab in the background: also a system notification (with the OS sound) if the person allowed alerts.
+          if (document.visibilityState !== "visible" && "Notification" in window && Notification.permission === "granted") {
+            try {
+              const n = new Notification(row.title ?? "VSM Operations", {
+                body: (row.body ?? "").slice(0, 140),
+                tag: row.link ?? undefined,
+                icon: "/icons/icon-192.png",
+              });
+              n.onclick = () => {
+                window.focus();
+                if (row.link) window.location.assign(row.link);
+                n.close();
+              };
+            } catch {
+              /* some browsers only allow notifications from a service worker */
+            }
+          }
         },
       ),
     );
@@ -101,13 +124,34 @@ export function NotificationSound({ employeeId }: { employeeId: string }) {
 /** Header button: sound on / off (plays a sample when turned on). */
 export function SoundToggle() {
   const [on, setOn] = useState(true);
-  useEffect(() => setOn(soundOn()), []);
+  const [locked, setLocked] = useState(false);
+  useEffect(() => {
+    setOn(soundOn());
+    // Browsers keep audio muted until the first click/tap on the page.
+    const ac = audio();
+    if (ac && ac.state !== "running") {
+      setLocked(true);
+      const unlock = () => void ac.resume().then(() => setLocked(false));
+      window.addEventListener("pointerdown", unlock, { once: true });
+      window.addEventListener("keydown", unlock, { once: true });
+      return () => {
+        window.removeEventListener("pointerdown", unlock);
+        window.removeEventListener("keydown", unlock);
+      };
+    }
+  }, []);
   return (
     <button
       type="button"
-      className="grid h-9 w-9 place-items-center rounded-full border border-line text-base hover:border-volt"
+      className="relative grid h-9 w-9 place-items-center rounded-full border border-line text-base hover:border-volt"
       aria-label={on ? "Mute notification sounds" : "Turn notification sounds on"}
-      title={on ? "Notification sound: on" : "Notification sound: off"}
+      title={
+        on
+          ? locked
+            ? "Sound is on — click anywhere on the page once so the browser allows it"
+            : "Notification sound: on"
+          : "Notification sound: off"
+      }
       onClick={() => {
         const next = !on;
         setOn(next);
@@ -116,10 +160,19 @@ export function SoundToggle() {
         } catch {
           /* ignore */
         }
-        if (next) playTone("message", true);
+        if (next) {
+          playTone("message", true);
+          if ("Notification" in window && Notification.permission === "default") void Notification.requestPermission();
+        }
       }}
     >
       <span aria-hidden>{on ? "🔔" : "🔕"}</span>
+      {on && locked && (
+        <span
+          className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 animate-pulse rounded-full bg-ember"
+          title="Click anywhere to enable sound"
+        />
+      )}
     </button>
   );
 }

@@ -1,5 +1,6 @@
 "use server";
 import { appUrl } from "@/lib/app-url";
+import { render } from "@/lib/email/templates";
 import { z } from "zod";
 import { requirePerm } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabase/server";
@@ -44,16 +45,18 @@ export async function sendResetLink(_p: PwState, fd: FormData): Promise<PwState>
   try {
     if (provider && from) {
       // Our own provider (Brevo/Resend) — not limited by Supabase's built-in mailer.
-      const { data, error } = await admin.auth.admin.generateLink({ type: "recovery", email: t.e.official_email, options: { redirectTo } });
-      if (error || !data.properties?.action_link) throw error ?? new Error("no link");
-      const link = data.properties.action_link;
+      const { data, error } = await admin.auth.admin.generateLink({ type: "recovery", email: t.e.official_email });
+      const hashed = data?.properties?.hashed_token;
+      if (error || !hashed) throw error ?? new Error("no link");
+      const link = `${appUrl()}/auth/callback?token_hash=${encodeURIComponent(hashed)}&type=recovery&next=/login/reset`;
+      const m = render("auth.reset_link", { name: t.e.full_name.split(" ")[0], email: t.e.official_email, link })!;
       await provider.send({
         from,
         to: t.e.official_email,
-        subject: "Reset your VSM Ops password",
+        subject: m.subject,
+        html: m.html,
+        text: m.text,
         refId: `reset-${t.e.id}-${Date.now()}`,
-        text: `Hi ${t.e.full_name},\n\nYour administrator sent you a password reset for VSM Ops.\nSet a new password: ${link}\n\nThe link works once and expires in 1 hour. If you didn't expect this, tell HR.`,
-        html: `<p>Hi ${escape(t.e.full_name)},</p><p>Your administrator sent you a password reset for <b>VSM Ops</b>.</p><p><a href="${link}" style="background:#D7FF3A;color:#0B0B0C;padding:10px 18px;border-radius:999px;text-decoration:none;font-weight:600">Set a new password</a></p><p style="color:#666;font-size:12px">The link works once and expires in 1 hour. If you didn't expect this, tell HR.</p>`,
         tags: ["password-reset"],
       });
     } else {

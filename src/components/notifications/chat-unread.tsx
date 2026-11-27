@@ -2,18 +2,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { openChannel } from "@/lib/supabase/browser";
+import { playTone } from "./sound";
 
 /** Live chat-inbox badge. Recounts on every new chat notification and whenever you open a conversation. */
 export function ChatUnread({ employeeId }: { employeeId: string }) {
   const [total, setTotal] = useState(0);
   const path = usePathname();
   const timer = useRef<number | null>(null);
+  const last = useRef<number | null>(null);
   const refresh = useCallback(() => {
     if (timer.current) window.clearTimeout(timer.current);
     timer.current = window.setTimeout(async () => {
       try {
         const r = await fetch("/api/chat/unread", { cache: "no-store" });
-        if (r.ok) setTotal(((await r.json()) as { total: number }).total);
+        if (r.ok) {
+          const next = ((await r.json()) as { total: number }).total;
+          const prev = last.current;
+          last.current = next;
+          // More unread than before, and not the first count after page load → ring (unless the live tone already did).
+          if (prev !== null && next > prev) playTone("message");
+          setTotal(next);
+        }
       } catch {
         /* offline: keep the last value */
       }
@@ -34,7 +43,7 @@ export function ChatUnread({ employeeId }: { employeeId: string }) {
     );
     const onFocus = () => refresh();
     window.addEventListener("focus", onFocus);
-    const beat = window.setInterval(() => document.visibilityState === "visible" && refresh(), 30000);
+    const beat = window.setInterval(() => refresh(), 20000); // also in background tabs, so the tone still plays
     return () => {
       window.clearInterval(beat);
       stop();

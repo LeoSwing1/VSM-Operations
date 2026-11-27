@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type Keyboard
 import Link from "next/link";
 import { addChatReaction, postChatMessage, reportChatMessage, sendChatMessage } from "@/app/(app)/chat/actions";
 import type { RealtimeChannel } from "@supabase/supabase-js";
-import { openChannel, supabaseBrowser } from "@/lib/supabase/browser";
+import { getAccessToken, openChannel } from "@/lib/supabase/browser";
 import { CHAT_THEMES, themeByKey } from "./chat-themes";
 import {
   MAX_CHAT_FILE,
@@ -12,6 +12,8 @@ import {
   chatFilePath,
   formatSize,
   previewKind,
+  removeUploaded,
+  uploadId,
   uploadResumable,
   uploadWithProgress,
   type PreviewKind,
@@ -67,6 +69,7 @@ export function ChatRoom({
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
+  const [liveNote, setLiveNote] = useState("");
   const [loading, setLoading] = useState(true);
   const lastRead = useRef("");
   const typingTimer = useRef<number | null>(null);
@@ -80,7 +83,7 @@ export function ChatRoom({
       const next = (j.messages ?? []) as Message[];
       setMessages(next);
       setMembers((j.members ?? []) as ChannelMember[]);
-      setError("");
+      setLiveNote(""); // a refresh never clears an upload/send error the person still needs to see
       setLoading(false);
       const latest = next.at(-1)?.id ?? "empty";
       if (latest !== lastRead.current) {
@@ -88,7 +91,7 @@ export function ChatRoom({
         if (!readOnly) void fetch(`/api/chat/${channelId}/read`, { method: "POST" });
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Connection issue.");
+      setLiveNote(e instanceof Error ? e.message : "Connection issue.");
       setLoading(false);
     }
   }, [channelId, readOnly]);
@@ -122,8 +125,8 @@ export function ChatRoom({
           ),
       {
         onStatus: (status) => {
-          if (status === "SUBSCRIBED") setError("");
-          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setError("Live updates paused — refreshing every 30 seconds.");
+          if (status === "SUBSCRIBED") setLiveNote("");
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setLiveNote("Live updates paused — refreshing every 30 seconds.");
         },
       },
     );
@@ -188,6 +191,7 @@ export function ChatRoom({
 
   const [sending, setSending] = useState(false);
   const [pending, setPending] = useState<LocalUpload | null>(null);
+  const [preparing, setPreparing] = useState("");
   const [inflight, setInflight] = useState<Record<string, LocalUpload>>({});
   const [dragging, setDragging] = useState(false);
   const [viewer, setViewer] = useState<Attachment | null>(null);
@@ -247,48 +251,54 @@ export function ChatRoom({
   // ---- Attachments: upload starts as soon as a file is chosen, pasted or dropped.
   async function startUpload(file: File) {
     setError("");
-    if (!orgId) return setError("Attachments are not available here.");
-    if (file.size === 0) return setError("That file is empty.");
-    if (file.size > MAX_CHAT_FILE) return setError(`"${file.name}" is ${formatSize(file.size)} — files can be up to 10 GB.`);
-    if (pending) discardPending();
-    const sb = supabaseBrowser();
-    const { data } = await sb.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return setError("Your session expired — refresh the page and try again.");
-    const mime = file.type || "application/octet-stream";
-    const kind = previewKind(mime, file.name);
-    const path = chatFilePath(orgId, channelId, employeeId, file.name, crypto.randomUUID());
-    const common = {
-      supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      accessToken: token,
-      bucket: "chat-files",
-      path,
-      file,
-      onProgress: (pct: number) => update(path, { progress: pct }),
-    };
-    // Small files in one request; big ones (videos, project files) in resumable 6 MB chunks — original bytes either way.
-    const up =
-      file.size > RESUMABLE_FROM
-        ? uploadResumable(common)
-        : uploadWithProgress({ ...common, anonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY! });
-    const item: LocalUpload = {
-      file,
-      name: file.name,
-      size: file.size,
-      mime,
-      kind,
-      url: kind === "image" || kind === "video" || kind === "audio" ? URL.createObjectURL(file) : null,
-      path,
-      progress: 0,
-      status: "uploading",
-      promise: up.promise,
-      abort: up.abort,
-    };
-    up.promise.then(
-      () => update(path, { status: "done", progress: 100 }),
-      (e: Error) => update(path, e.message === "cancelled" ? {} : { status: "error", error: e.message }),
-    );
-    setPending(item);
+    setPreparing(file.name); // something shows the instant a file is picked
+    try {
+      if (!orgId) throw new Error("Attachments are not available here.");
+      if (file.size === 0) throw new Error("That file is empty.");
+      if (file.size > MAX_CHAT_FILE) throw new Error(`"${file.name}" is ${formatSize(file.size)} — files can be up to 10 GB.`);
+      if (pending) discardPending();
+      // Login cookies are HttpOnly (page scripts can't read them), so the short-lived token comes from the server.
+      const token = await getAccessToken();
+      const mime = file.type || "application/octet-stream";
+      const kind = previewKind(mime, file.name);
+      const path = chatFilePath(orgId, channelId, employeeId, file.name, uploadId());
+      const common = {
+        supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        accessToken: token,
+        bucket: "chat-files",
+        path,
+        file,
+        onProgress: (pct: number) => update(path, { progress: pct }),
+      };
+      // Small files in one request; big ones (videos, project files) in resumable 6 MB chunks — original bytes either way.
+      const up =
+        file.size > RESUMABLE_FROM
+          ? uploadResumable({ ...common, getToken: getAccessToken })
+          : uploadWithProgress({ ...common, anonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY! });
+      const item: LocalUpload = {
+        file,
+        name: file.name,
+        size: file.size,
+        mime,
+        kind,
+        url: kind === "image" || kind === "video" || kind === "audio" ? URL.createObjectURL(file) : null,
+        path,
+        progress: 0,
+        status: "uploading",
+        promise: up.promise,
+        abort: up.abort,
+      };
+      up.promise.then(
+        () => update(path, { status: "done", progress: 100 }),
+        (e: Error) => update(path, e.message === "cancelled" ? {} : { status: "error", error: e.message }),
+      );
+      setPending(item);
+    } catch (e) {
+      setError(`Couldn't attach "${file.name}": ${(e as Error).message}`);
+      if (fileInput.current) fileInput.current.value = "";
+    } finally {
+      setPreparing("");
+    }
   }
   // Progress lives in whichever place the upload currently is: the composer or a sent bubble.
   function update(path: string, patch: Partial<LocalUpload>) {
@@ -301,7 +311,20 @@ export function ChatRoom({
   function discardPending() {
     if (!pending) return;
     if (pending.status === "uploading") pending.abort();
-    else if (pending.status === "done") void supabaseBrowser().storage.from("chat-files").remove([pending.path]);
+    else if (pending.status === "done") {
+      const path = pending.path;
+      void getAccessToken()
+        .then((accessToken) =>
+          removeUploaded({
+            supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL!,
+            anonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+            accessToken,
+            bucket: "chat-files",
+            path,
+          }),
+        )
+        .catch(() => undefined);
+    }
     if (pending.url) URL.revokeObjectURL(pending.url);
     setPending(null);
     if (fileInput.current) fileInput.current.value = "";
@@ -442,12 +465,8 @@ export function ChatRoom({
         style={{ background: theme.bg, color: theme.text }}
       >
         {loading && <p className="text-sm text-muted">Loading conversation…</p>}
-        {error && (
-          <p role="alert" className="text-sm text-danger">
-            {error}
-          </p>
-        )}
-        {!loading && !messages.length && !error && (
+        {liveNote && <p className="text-xs text-muted">{liveNote}</p>}
+        {!loading && !messages.length && (
           <div className="grid min-h-64 place-items-center text-center">
             <div>
               <p className="font-semibold">This conversation is ready</p>
@@ -637,12 +656,23 @@ export function ChatRoom({
       {!readOnly && (
         <form ref={formRef} onSubmit={send} className="shrink-0 border-t border-line bg-panel p-3 sm:p-4">
           <input type="hidden" name="channel_id" value={channelId} />
+          {error && (
+            <div
+              role="alert"
+              className="mb-2 flex items-start justify-between gap-3 rounded-xl border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger"
+            >
+              <span>{error}</span>
+              <button
+                type="button"
+                onClick={() => setError("")}
+                aria-label="Dismiss"
+                className="shrink-0 text-xs opacity-70 hover:opacity-100"
+              >
+                ✕
+              </button>
+            </div>
+          )}
           <div className="rounded-2xl border border-line bg-paper p-2">
-            {pending && (
-              <div className="mb-2">
-                <UploadPreview u={pending} onRemove={discardPending} onRetry={retryPending} />
-              </div>
-            )}
             <textarea
               name="body"
               value={draft}
@@ -655,11 +685,22 @@ export function ChatRoom({
                   void startUpload(f);
                 }
               }}
-              rows={2}
+              rows={1}
               maxLength={10000}
               placeholder={pending ? "Add a message (optional)…" : "Write a message… (Enter to send, Shift+Enter for a new line)"}
-              className="input max-h-40 min-h-16 resize-y border-0 bg-transparent focus:ring-0"
+              className="input max-h-40 min-h-11 resize-y border-0 bg-transparent focus:ring-0"
             />
+            {preparing && !pending && (
+              <div className="mx-1 mb-1 flex max-w-md items-center gap-2 rounded-lg border border-line bg-panel px-2 py-1.5 text-xs">
+                <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-volt/30 border-t-volt" aria-hidden />
+                <span className="truncate">Preparing {preparing}…</span>
+              </div>
+            )}
+            {pending && (
+              <div className="mx-1 mb-1">
+                <AttachmentChip u={pending} onRemove={discardPending} onRetry={retryPending} />
+              </div>
+            )}
             <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
               <label className="cursor-pointer rounded-lg px-3 py-2 text-xs text-muted hover:bg-ink/[0.05]">
                 ＋ {pending ? "Change file" : "Attach any file (up to 10 GB) — or paste / drop it here"}
@@ -742,13 +783,13 @@ function UploadPreview({
   return (
     <div className={`relative ${inBubble ? "mt-2" : ""}`}>
       {visual ? (
-        <div className={`relative overflow-hidden rounded-xl bg-black ${inBubble ? "max-w-sm" : "max-w-xs"}`}>
+        <div className="relative w-60 max-w-full overflow-hidden rounded-xl bg-black">
           {u.kind === "image" ? (
             // eslint-disable-next-line @next/next/no-img-element -- local object URL preview
             <img
               src={u.url!}
               alt=""
-              className={`max-h-64 w-full object-cover transition duration-500 ${busy || failed ? "scale-105 blur-md brightness-75" : ""}`}
+              className={`max-h-48 w-full object-cover transition duration-500 ${busy || failed ? "scale-105 blur-md brightness-75" : ""}`}
             />
           ) : (
             <video
@@ -756,7 +797,7 @@ function UploadPreview({
               muted
               playsInline
               preload="metadata"
-              className={`max-h-64 w-full object-cover transition duration-500 ${busy || failed ? "scale-105 blur-md brightness-75" : ""}`}
+              className={`max-h-48 w-full object-cover transition duration-500 ${busy || failed ? "scale-105 blur-md brightness-75" : ""}`}
             />
           )}
           <span className="absolute inset-0 grid place-items-center">
@@ -960,6 +1001,91 @@ function Lightbox({ a, onClose }: { a: Attachment; onClose: () => void }) {
         {/* eslint-disable-next-line @next/next/no-img-element -- original file, no resizing */}
         <img src={a.url!} alt={a.file_name} className="max-h-full max-w-full object-contain" onClick={(e) => e.stopPropagation()} />
       </div>
+    </div>
+  );
+}
+
+/** Compact attachment chip under the message box: small thumbnail with the progress ring, name, size, status, ✕. */
+function AttachmentChip({ u, onRemove, onRetry }: { u: LocalUpload; onRemove: () => void; onRetry: () => void }) {
+  const busy = u.status === "uploading";
+  const failed = u.status === "error";
+  const done = u.status === "done";
+  const visual = (u.kind === "image" || u.kind === "video") && u.url;
+  return (
+    <div
+      className={`flex max-w-md items-center gap-2.5 rounded-lg border bg-panel p-1.5 pr-2 ${failed ? "border-danger/50" : "border-line"}`}
+      title={failed ? u.error : u.name}
+    >
+      <span className="relative grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-md bg-ink/[0.07] text-[9px] font-bold">
+        {visual ? (
+          u.kind === "image" ? (
+            // eslint-disable-next-line @next/next/no-img-element -- local object URL preview
+            <img
+              src={u.url!}
+              alt=""
+              className={`h-full w-full object-cover transition duration-300 ${busy || failed ? "scale-110 blur-[3px] brightness-75" : ""}`}
+            />
+          ) : (
+            <video
+              src={u.url!}
+              muted
+              playsInline
+              preload="metadata"
+              className={`h-full w-full object-cover ${busy || failed ? "blur-[3px] brightness-75" : ""}`}
+            />
+          )
+        ) : (
+          <span className={busy ? "opacity-40" : ""}>{u.kind === "pdf" ? "PDF" : u.kind === "audio" ? "🎵" : extOf(u.name)}</span>
+        )}
+        {busy && (
+          <span className="absolute inset-0 grid place-items-center">
+            <ProgressRing pct={u.progress} size={30} />
+          </span>
+        )}
+        {done && (
+          <span
+            className="absolute bottom-0.5 right-0.5 grid h-4 w-4 place-items-center rounded-full bg-emerald-500 text-[9px] text-white"
+            aria-label="Ready"
+          >
+            ✓
+          </span>
+        )}
+        {failed && <span className="absolute inset-0 grid place-items-center bg-black/40 text-sm text-white">!</span>}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-xs font-medium">{u.name}</span>
+        <span className={`block text-[10px] ${failed ? "line-clamp-2 text-danger" : "truncate text-muted"}`}>
+          {busy
+            ? `${formatSize(u.size)} · Uploading ${u.progress}%`
+            : done
+              ? `${formatSize(u.size)} · Ready to send`
+              : `Upload failed — ${u.error ?? "try again"}`}
+        </span>
+        <span className="mt-1 block h-[3px] w-full overflow-hidden rounded-full bg-ink/10">
+          <span
+            className={`block h-full rounded-full transition-[width] duration-300 ${failed ? "bg-danger" : done ? "bg-emerald-500" : "bg-volt"}`}
+            style={{ width: `${failed ? 100 : u.progress}%` }}
+          />
+        </span>
+      </span>
+      {failed && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-semibold text-volt hover:bg-ink/5"
+        >
+          Retry
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={busy ? `Cancel upload of ${u.name}` : `Remove ${u.name}`}
+        title={busy ? "Cancel upload" : "Remove"}
+        className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs text-muted hover:bg-ink/10 hover:text-ink"
+      >
+        ✕
+      </button>
     </div>
   );
 }

@@ -222,7 +222,14 @@ function Overview({ e, manage, canReset, self, teams }: { e: any; manage: boolea
 }
 
 async function OnboardingTab({ sb, id, manage }: { sb: SB; id: string; manage: boolean }) {
-  const { data: who } = await sb.from("employees").select("joining_date, salary_day").eq("id", id).maybeSingle();
+  const [{ data: who }, { data, error }] = await Promise.all([
+    sb.from("employees").select("joining_date, salary_day").eq("id", id).maybeSingle(),
+    sb
+      .from("onboarding_checklist_items")
+      .select("id,title,category,due_date,completed_at,completed_by")
+      .eq("employee_id", id)
+      .order("created_at"),
+  ]);
   const dates =
     who?.joining_date && who?.salary_day ? (
       <div className="mb-4 grid gap-3 sm:grid-cols-3">
@@ -231,11 +238,6 @@ async function OnboardingTab({ sb, id, manage }: { sb: SB; id: string; manage: b
         <Stat label="First salary" value={longDate(firstSalaryDate(who.salary_day, who.joining_date))} tone="volt" />
       </div>
     ) : null;
-  const { data, error } = await sb
-    .from("onboarding_checklist_items")
-    .select("id,title,category,due_date,completed_at,completed_by")
-    .eq("employee_id", id)
-    .order("created_at");
   if (error)
     return (
       <>

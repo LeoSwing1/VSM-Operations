@@ -82,6 +82,7 @@ export function storageHost(supabaseUrl: string): string {
 export function uploadResumable(opts: {
   supabaseUrl: string;
   accessToken: string;
+  getToken?: () => Promise<string>;
   bucket: string;
   path: string;
   file: File;
@@ -105,6 +106,10 @@ export function uploadResumable(opts: {
             cacheControl: "3600",
           },
           chunkSize: 6 * 1024 * 1024, // Supabase requires exactly 6 MB chunks
+          // Big uploads can outlast the 1-hour login token: put a fresh one on every chunk.
+          onBeforeRequest: async (req) => {
+            if (opts.getToken) req.setHeader("authorization", `Bearer ${await opts.getToken()}`);
+          },
           onProgress: (sent, total) => opts.onProgress(Math.min(99, Math.floor((sent / Math.max(1, total)) * 100))),
           onSuccess: () => {
             opts.onProgress(100);
@@ -142,4 +147,30 @@ export function uploadResumable(opts: {
       stop();
     },
   };
+}
+
+/** Unique id that also works on plain-http pages (crypto.randomUUID needs https). */
+export function uploadId(): string {
+  const c = globalThis.crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  const b = new Uint8Array(16);
+  if (c?.getRandomValues) c.getRandomValues(b);
+  else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+  b[6] = (b[6]! & 0x0f) | 0x40;
+  b[8] = (b[8]! & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+/** Delete an uploaded-but-unsent file (the uploader may delete their own objects). Best effort. */
+export async function removeUploaded(opts: { supabaseUrl: string; anonKey: string; accessToken: string; bucket: string; path: string }) {
+  try {
+    await fetch(`${opts.supabaseUrl.replace(/\/+$/, "")}/storage/v1/object/${opts.bucket}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${opts.accessToken}`, apikey: opts.anonKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ prefixes: [opts.path] }),
+    });
+  } catch {
+    /* ignore: an orphaned file is harmless */
+  }
 }

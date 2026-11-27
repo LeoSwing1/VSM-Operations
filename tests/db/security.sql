@@ -802,8 +802,8 @@ update attendance_settings set geofence_mode = 'WARN' where org_id = :'org';
 update attendance_events set created_at = now() - interval '1 minute' where employee_id = :'e_f';
 select set_config('request.jwt.claim.sub', :'F', false); set role authenticated;
 select record_attendance_v2('CLOCK_OUT','MOBILE', 28.6139, 77.2090, 30);
-select t_ok((select flag like 'Outside Meerut office%' and inside_geofence = false from attendance_events where employee_id = :'e_f' order by occurred_at desc limit 1), 'WARN: punch away from office is saved but flagged');
-select id as flagged from attendance_events where employee_id = :'e_f' and flag is not null order by occurred_at desc limit 1 \gset
+select t_ok((select flag like 'Outside Meerut office%' and inside_geofence = false from attendance_events where employee_id = :'e_f' order by occurred_at desc, created_at desc limit 1), 'WARN: punch away from office is saved but flagged');
+select id as flagged from attendance_events where employee_id = :'e_f' and flag is not null order by occurred_at desc, created_at desc limit 1 \gset
 select t_denied(format($$select review_punch(%L)$$, :'flagged'), 'nobody reviews their own flagged punch');
 reset role;
 select set_config('request.jwt.claim.sub', :'M', false); set role authenticated;

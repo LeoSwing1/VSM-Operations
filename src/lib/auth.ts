@@ -34,10 +34,9 @@ export interface Ctx {
 /** Resolve the signed-in employee once per request. Permissions come from the DB, never the client. */
 export const getContext = cache(async (): Promise<Ctx | null> => {
   const supabase = await supabaseServer();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return null;
+  // The middleware has already verified (and refreshed) the session for this request. my_context() runs as the
+  // signed-in user — the database checks the JWT itself and returns nothing without a valid one — so a second
+  // round-trip to Supabase Auth here would only add latency.
   const { data, error } = await supabase.rpc("my_context");
   if (error || !data) return null;
   return data as Ctx;

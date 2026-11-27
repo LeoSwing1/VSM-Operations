@@ -180,6 +180,21 @@ templates["auth.new_password"] = (p) => ({
   text: `New temporary password for ${p.email}: ${p.password}\nSign in at ${app()}/login — you'll be asked to choose your own.`,
 });
 
+templates["auth.reset_link"] = (p) => ({
+  subject: "Reset your VSM Operations password",
+  html: layout(
+    "Reset your password",
+    `Hi ${esc(p.name || "there")}, we received a request to reset the password for your VSM Operations account.` +
+      detailRows([
+        ["Login email", p.email],
+        ["Link valid for", "1 hour, one use"],
+      ]) +
+      `<p style="color:#c9c9c4">Click the button below and choose a new password. If you didn't ask for this, you can ignore this email — your current password keeps working.</p>`,
+    { label: "Choose a new password", href: String(p.link) },
+  ),
+  text: `Hi ${p.name || "there"},\n\nReset your VSM Operations password (${p.email}) here — the link works once, for 1 hour:\n${p.link}\n\nIf you didn't ask for this, ignore this email.\nLogin page: ${app()}/login`,
+});
+
 export function render(template: string, payload: P): Rendered | null {
   const t = templates[template];
   return t ? t(payload) : null;

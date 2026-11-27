@@ -30,3 +30,17 @@ describe("welcome email", () => {
     expect(m.html).toContain('href="https://ops.example.com/login"');
   });
 });
+
+describe("password reset email", () => {
+  it("is branded, has the reset button and never contains a password", () => {
+    vi.stubEnv("APP_URL", "https://vsm-operations.vercel.app");
+    const link = "https://vsm-operations.vercel.app/auth/callback?token_hash=abc&type=recovery&next=/login/reset";
+    const m = render("auth.reset_link", { name: "Kevin", email: "kevin@vsm.test", link })!;
+    expect(m.subject).toBe("Reset your VSM Operations password");
+    expect(m.html).toContain("VSM Growth Operations");
+    expect(m.html).toContain("Choose a new password");
+    expect(m.html).toContain(link.replace(/&/g, "&amp;"));
+    expect(m.text).toContain(link);
+    expect(m.html.toLowerCase()).not.toContain("temporary password");
+  });
+});

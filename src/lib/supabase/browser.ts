@@ -26,14 +26,30 @@ export function supabaseBrowser(): SupabaseClient {
   return client;
 }
 
+let currentToken = "";
+
+/**
+ * The signed-in user's short-lived access token, for direct uploads to Storage (the storage rules check it).
+ * Comes from the server like the Realtime token — session cookies stay HttpOnly.
+ */
+export async function getAccessToken(): Promise<string> {
+  await ensureRealtimeAuth();
+  if (!currentToken) throw new Error("Your session expired — refresh the page and try again.");
+  return currentToken;
+}
+
 /** Make sure Realtime carries a valid user token; refreshes ~2 minutes before it expires. */
 export async function ensureRealtimeAuth(): Promise<void> {
   if (Date.now() < expiresAtMs - 120_000) return;
   if (!pending) {
     pending = (async () => {
       const r = await fetch("/api/realtime/token", { cache: "no-store", credentials: "same-origin" });
-      if (!r.ok) throw new Error(`Realtime authorisation failed (${r.status})`);
+      if (!r.ok)
+        throw new Error(
+          r.status === 401 ? "Your session expired — refresh the page and sign in again." : `Couldn't confirm your login (${r.status}).`,
+        );
       const { access_token, expires_at } = (await r.json()) as { access_token: string; expires_at: number };
+      currentToken = access_token;
       await supabaseBrowser().realtime.setAuth(access_token);
       expiresAtMs = expires_at * 1000;
       if (refreshTimer) clearTimeout(refreshTimer);
