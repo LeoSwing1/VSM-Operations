@@ -44,3 +44,14 @@ describe("password reset email", () => {
     expect(m.html.toLowerCase()).not.toContain("temporary password");
   });
 });
+
+describe("reset links are scanner-safe", () => {
+  it("emails point at the confirm page, never straight at the token check", async () => {
+    const fs = await import("node:fs");
+    for (const f of ["src/app/auth/forgot/route.ts", "src/app/(app)/people/password-actions.ts"]) {
+      const src = fs.readFileSync(f, "utf8");
+      expect(src).toContain("/auth/confirm?token_hash=");
+      expect(src).not.toContain("/auth/callback?token_hash=");
+    }
+  });
+});

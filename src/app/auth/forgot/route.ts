@@ -28,7 +28,7 @@ async function sendBranded(email: string): Promise<boolean> {
     .neq("status", "EXITED")
     .limit(1)
     .maybeSingle();
-  const link = `${appUrl()}/auth/callback?token_hash=${encodeURIComponent(hashed)}&type=recovery&next=/login/reset`;
+  const link = `${appUrl()}/auth/confirm?token_hash=${encodeURIComponent(hashed)}&type=recovery`;
   const m = render("auth.reset_link", { name: emp?.full_name?.split(" ")[0] ?? "", email, link })!;
   await provider.send({
     from,

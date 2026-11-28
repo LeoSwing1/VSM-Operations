@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { supabaseServer } from "@/lib/supabase/server";
 import { go, msg, sameOrigin } from "@/lib/auth-forms";
+import { passwordUpdateMessage } from "@/lib/password-errors";
 
 export async function POST(req: NextRequest) {
   if (!sameOrigin(req)) return go(req, "/login");
@@ -12,15 +13,10 @@ export async function POST(req: NextRequest) {
   if (pw.length < 10 || pw !== confirm) return go(req, msg(back, "err", "Passwords must match and be at least 10 characters."));
   const sb = await supabaseServer();
   const { error } = await sb.auth.updateUser({ password: pw, data: { must_change_password: false } });
-  if (error)
-    return go(
-      req,
-      msg(
-        back,
-        "err",
-        error.message.includes("same") ? "Choose a password you haven't used before." : "Reset link expired. Request a new one.",
-      ),
-    );
+  if (error) {
+    console.warn("[auth/new-password]", error.code ?? error.name, error.message);
+    return go(req, msg(back, "err", passwordUpdateMessage(error as never)));
+  }
   await sb.auth.signOut({ scope: "others" }); // revoke other sessions after a password change
   return go(req, msg("/dashboard", "ok", "Password updated."));
 }

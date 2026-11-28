@@ -48,7 +48,7 @@ export async function sendResetLink(_p: PwState, fd: FormData): Promise<PwState>
       const { data, error } = await admin.auth.admin.generateLink({ type: "recovery", email: t.e.official_email });
       const hashed = data?.properties?.hashed_token;
       if (error || !hashed) throw error ?? new Error("no link");
-      const link = `${appUrl()}/auth/callback?token_hash=${encodeURIComponent(hashed)}&type=recovery&next=/login/reset`;
+      const link = `${appUrl()}/auth/confirm?token_hash=${encodeURIComponent(hashed)}&type=recovery`;
       const m = render("auth.reset_link", { name: t.e.full_name.split(" ")[0], email: t.e.official_email, link })!;
       await provider.send({
         from,

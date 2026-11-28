@@ -18,9 +18,13 @@ export async function GET(req: NextRequest) {
   if (code) {
     const { error } = await sb.auth.exchangeCodeForSession(code);
     if (!error) return NextResponse.redirect(new URL(safe, req.url));
-  } else if (tokenHash && type && ["recovery", "invite", "magiclink", "email"].includes(type)) {
-    const { error } = await sb.auth.verifyOtp({ token_hash: tokenHash, type });
-    if (!error) return NextResponse.redirect(new URL(safe, req.url));
+  } else if (tokenHash && type) {
+    // Never spend the token on a GET (mail scanners open links): show the confirm button instead.
+    const to = new URL("/auth/confirm", req.url);
+    to.searchParams.set("token_hash", tokenHash);
+    to.searchParams.set("type", type);
+    to.searchParams.set("next", safe);
+    return NextResponse.redirect(to);
   }
   return NextResponse.redirect(
     new URL("/login?err=" + encodeURIComponent("That link is invalid or has expired — ask for a new one with “Forgot password”."), req.url),
