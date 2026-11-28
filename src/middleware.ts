@@ -59,7 +59,9 @@ export async function middleware(req: NextRequest) {
   }
   // Signed-in users skip the login page — EXCEPT when the app sent them there because their
   // account has no employee profile (?e=…). Redirecting those back to /dashboard caused a loop.
-  if (user && path === "/login" && !req.nextUrl.searchParams.has("e")) {
+  // Also not when they asked for a reset link or there's a message to show (a used/expired link lands here).
+  const qs = req.nextUrl.searchParams;
+  if (user && path === "/login" && !qs.has("e") && !qs.has("forgot") && !qs.has("err") && !qs.has("ok")) {
     const to = req.nextUrl.clone();
     to.pathname = "/dashboard";
     to.search = "";

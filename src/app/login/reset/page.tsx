@@ -11,9 +11,9 @@ export default async function Reset({ searchParams }: { searchParams: Promise<Re
     return (
       <main className="flex min-h-screen items-center justify-center p-6">
         <div className="w-full max-w-sm space-y-4">
-          <h1 className="display text-4xl">Link expired</h1>
+          <h1 className="display text-4xl">You’re not signed in</h1>
           <p className="text-sm text-muted">
-            This reset session has ended — links work once, for 1 hour. Ask for a fresh one and open it straight away.
+            Sign in to change your password, or ask for a reset link — the email lets you set a new password in one step.
           </p>
           <a href="/login?forgot=1" className="btn-primary block w-full text-center">
             Send me a new reset link

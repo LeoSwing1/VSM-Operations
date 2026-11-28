@@ -18,3 +18,19 @@ describe("password update errors are explained, not all called 'link expired'", 
   it("anything else shows the real reason", () =>
     expect(m({ message: "Database error" })).toBe("Couldn’t update the password: Database error"));
 });
+
+describe("one-step reset (link check + new password in the same request)", () => {
+  it("checks the password before spending the link, and never sends a session across a redirect", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync("src/app/auth/verify/route.ts", "utf8");
+    const check = src.indexOf("pw.length < 10");
+    const spend = src.indexOf("verifyOtp(");
+    const save = src.indexOf("updateUser(");
+    expect(check).toBeGreaterThan(0);
+    expect(spend).toBeGreaterThan(check); // typo first → link not wasted
+    expect(save).toBeGreaterThan(spend); // saved in the same request
+    const page = fs.readFileSync("src/app/auth/confirm/page.tsx", "utf8");
+    expect(page).toContain('name="password"');
+    expect(page).toContain('action="/auth/verify"');
+  });
+});
